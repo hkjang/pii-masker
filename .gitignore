@@ -1,0 +1,9 @@
+.gocache/
+.gotmp/
+.dockerconfig/
+.gh/
+.smoke/
+bin/
+data/
+pii-masker-image.tar
+pii-masker-image.tar.gz

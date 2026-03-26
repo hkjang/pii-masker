@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PII Masker API Playground</title>
+  <style>
+    :root {
+      --bg: #f4f1ea;
+      --panel: rgba(255, 252, 246, 0.92);
+      --ink: #14213d;
+      --muted: #5f6b7a;
+      --line: rgba(20, 33, 61, 0.14);
+      --accent: #d97706;
+      --accent-strong: #9a3412;
+      --ok: #1d6b4f;
+      --error: #b42318;
+      --shadow: 0 22px 60px rgba(20, 33, 61, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(217, 119, 6, 0.18), transparent 32%),
+        radial-gradient(circle at bottom right, rgba(20, 33, 61, 0.16), transparent 28%),
+        linear-gradient(145deg, #f7f2ea, #eef4f8 58%, #fdf8ef);
+    }
+
+    .shell {
+      width: min(1120px, calc(100vw - 32px));
+      margin: 24px auto 40px;
+      display: grid;
+      gap: 20px;
+    }
+
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+
+    .hero {
+      padding: 28px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .eyebrow {
+      font-size: 12px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--accent-strong);
+      font-weight: 700;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 4vw, 48px);
+      line-height: 1.05;
+    }
+
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 760px;
+      line-height: 1.6;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 20px;
+    }
+
+    .panel {
+      padding: 22px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .panel h2 {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    .upload-zone {
+      border: 1.5px dashed rgba(20, 33, 61, 0.2);
+      border-radius: 20px;
+      padding: 28px;
+      background: rgba(255, 255, 255, 0.7);
+      text-align: center;
+      transition: border-color 180ms ease, transform 180ms ease, background 180ms ease;
+    }
+
+    .upload-zone.dragover {
+      border-color: var(--accent);
+      background: rgba(255, 244, 230, 0.92);
+      transform: translateY(-2px);
+    }
+
+    .upload-zone strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 18px;
+    }
+
+    .file-meta {
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    input[type="text"], select {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(20, 33, 61, 0.14);
+      background: rgba(255, 255, 255, 0.88);
+      font: inherit;
+      color: var(--ink);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    button, .download-link {
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 18px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 160ms ease, opacity 160ms ease, box-shadow 160ms ease;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    button:hover, .download-link:hover { transform: translateY(-1px); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    .primary {
+      background: linear-gradient(135deg, var(--accent), #f59e0b);
+      color: white;
+      box-shadow: 0 14px 30px rgba(217, 119, 6, 0.24);
+    }
+
+    .secondary, .download-link {
+      background: rgba(20, 33, 61, 0.08);
+      color: var(--ink);
+    }
+
+    .status {
+      border-radius: 16px;
+      padding: 14px 16px;
+      background: rgba(20, 33, 61, 0.05);
+      color: var(--ink);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .status.ok { background: rgba(29, 107, 79, 0.12); color: var(--ok); }
+    .status.error { background: rgba(180, 35, 24, 0.12); color: var(--error); }
+
+    .stack {
+      display: grid;
+      gap: 12px;
+    }
+
+    pre {
+      margin: 0;
+      padding: 16px;
+      border-radius: 18px;
+      background: #111827;
+      color: #e5f0ff;
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .pill {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(20, 33, 61, 0.08);
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .history {
+      display: grid;
+      gap: 10px;
+    }
+
+    .history-item {
+      padding: 14px;
+      border-radius: 18px;
+      border: 1px solid rgba(20, 33, 61, 0.12);
+      background: rgba(255, 255, 255, 0.7);
+    }
+
+    .history-item strong {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 920px) {
+      .grid { grid-template-columns: 1fr; }
+      .controls { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <span class="eyebrow">PII Masker Playground</span>
+      <h1>PDF/PNG 파일을 올리고 바로 마스킹 결과를 확인하세요.</h1>
+      <p>이 페이지는 현재 API 서버 위에 직접 붙어 있습니다. 파일 업로드, 비동기 작업 생성, 상태 조회, 결과 다운로드까지 한 화면에서 테스트할 수 있습니다.</p>
+      <div class="pill-row" id="config-pills"></div>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <h2>업로드 테스트</h2>
+        <div id="upload-zone" class="upload-zone">
+          <strong>PDF 또는 PNG 파일을 끌어다 놓거나 선택하세요</strong>
+          <p class="file-meta" id="file-meta">선택된 파일이 없습니다.</p>
+          <input id="file-input" type="file" accept=".pdf,.png,application/pdf,image/png" hidden>
+          <div class="actions" style="justify-content:center; margin-top:16px;">
+            <button class="secondary" id="choose-file" type="button">파일 선택</button>
+          </div>
+        </div>
+
+        <div class="controls">
+          <label>
+            Model
+            <input id="model" type="text" value="pii" placeholder="pii">
+          </label>
+          <label>
+            Language
+            <select id="lang">
+              <option value="ko">ko</option>
+              <option value="en">en</option>
+              <option value="ja">ja</option>
+              <option value="zh">zh</option>
+            </select>
+          </label>
+          <label>
+            Schema
+            <select id="schema">
+              <option value="oac">oac</option>
+              <option value="ufp">ufp</option>
+            </select>
+          </label>
+          <label>
+            Verbose
+            <select id="verbose">
+              <option value="false">false</option>
+              <option value="true">true</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="actions">
+          <button class="primary" id="process-now" type="button">업로드 후 완료까지 기다리기</button>
+          <button class="secondary" id="create-job" type="button">잡만 생성</button>
+          <button class="secondary" id="refresh-history" type="button">최근 작업 새로고침</button>
+        </div>
+
+        <div id="status" class="status">대기 중입니다.</div>
+
+        <div class="stack">
+          <div class="actions" id="download-actions"></div>
+          <pre id="result-json">아직 실행 결과가 없습니다.</pre>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>최근 작업</h2>
+        <div id="history" class="history">
+          <div class="muted">로딩 중...</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const fileInput = document.getElementById('file-input');
+    const chooseFileButton = document.getElementById('choose-file');
+    const processNowButton = document.getElementById('process-now');
+    const createJobButton = document.getElementById('create-job');
+    const refreshHistoryButton = document.getElementById('refresh-history');
+    const uploadZone = document.getElementById('upload-zone');
+    const fileMeta = document.getElementById('file-meta');
+    const statusBox = document.getElementById('status');
+    const resultJson = document.getElementById('result-json');
+    const downloadActions = document.getElementById('download-actions');
+    const historyRoot = document.getElementById('history');
+    const configPills = document.getElementById('config-pills');
+
+    let selectedFile = null;
+
+    chooseFileButton.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => setSelectedFile(fileInput.files[0] || null));
+    processNowButton.addEventListener('click', () => submitAndWait());
+    createJobButton.addEventListener('click', () => createJob(false));
+    refreshHistoryButton.addEventListener('click', () => loadHistory());
+
+    ['dragenter', 'dragover'].forEach((eventName) => {
+      uploadZone.addEventListener(eventName, (event) => {
+        event.preventDefault();
+        uploadZone.classList.add('dragover');
+      });
+    });
+
+    ['dragleave', 'drop'].forEach((eventName) => {
+      uploadZone.addEventListener(eventName, (event) => {
+        event.preventDefault();
+        uploadZone.classList.remove('dragover');
+      });
+    });
+
+    uploadZone.addEventListener('drop', (event) => {
+      const file = event.dataTransfer?.files?.[0] || null;
+      setSelectedFile(file);
+    });
+
+    async function bootstrap() {
+      await Promise.all([loadConfig(), loadHistory()]);
+    }
+
+    function setSelectedFile(file) {
+      selectedFile = file;
+      if (!file) {
+        fileMeta.textContent = '선택된 파일이 없습니다.';
+        return;
+      }
+      fileMeta.textContent = `${file.name} · ${formatBytes(file.size)} · ${file.type || 'mime 미확인'}`;
+    }
+
+    function buildFormData() {
+      if (!selectedFile) {
+        throw new Error('먼저 파일을 선택하세요.');
+      }
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+      formData.append('model', document.getElementById('model').value.trim());
+      formData.append('lang', document.getElementById('lang').value);
+      formData.append('schema', document.getElementById('schema').value);
+      formData.append('verbose', document.getElementById('verbose').value);
+      return formData;
+    }
+
+    async function submitAndWait() {
+      try {
+        setBusy(true);
+        setStatus('업로드 중입니다.', 'default');
+        const metadata = await createJob(true);
+        if (!metadata?.job_id) {
+          throw new Error('job_id를 받지 못했습니다.');
+        }
+        await waitForCompletion(metadata.job_id);
+      } catch (error) {
+        setStatus(error.message || '요청 처리 중 오류가 발생했습니다.', 'error');
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function createJob(waitMessage) {
+      try {
+        setBusy(true);
+        if (waitMessage) {
+          setStatus('비동기 작업을 생성했습니다. 완료될 때까지 상태를 추적합니다.', 'default');
+        } else {
+          setStatus('비동기 작업을 생성하는 중입니다.', 'default');
+        }
+        clearDownloads();
+        const response = await fetch('/v1/jobs', {
+          method: 'POST',
+          body: buildFormData(),
+        });
+        const metadata = await response.json();
+        if (!response.ok) {
+          throw new Error(extractError(metadata));
+        }
+        renderMetadata(metadata);
+        setStatus(`작업 생성 완료: ${metadata.job_id}`, 'ok');
+        await loadHistory();
+        return metadata;
+      } catch (error) {
+        setStatus(error.message || '작업 생성 실패', 'error');
+        throw error;
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function waitForCompletion(jobId) {
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const response = await fetch(`/v1/jobs/${encodeURIComponent(jobId)}`);
+        const metadata = await response.json();
+        if (!response.ok) {
+          throw new Error(extractError(metadata));
+        }
+        renderMetadata(metadata);
+        if (metadata.status === 'completed') {
+          setStatus(`작업 완료: ${jobId}`, 'ok');
+          addDownloadLink(metadata.output?.download_url, metadata.output?.file_name || 'masked-result');
+          await loadHistory();
+          return;
+        }
+        if (metadata.status === 'failed') {
+          throw new Error(extractError(metadata));
+        }
+        setStatus(`작업 진행 중: ${metadata.status}`, 'default');
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+      }
+      throw new Error('작업이 시간 안에 완료되지 않았습니다.');
+    }
+
+    async function loadConfig() {
+      const response = await fetch('/v1/config/public');
+      const payload = await response.json();
+      configPills.innerHTML = '';
+      const pills = [
+        `최대 파일 크기 ${formatBytes(payload.limits.max_file_size_bytes)}`,
+        `최대 페이지 ${payload.limits.max_pages}`,
+        `지원 형식 ${payload.supported_types.join(', ')}`,
+      ];
+      pills.forEach((text) => {
+        const span = document.createElement('span');
+        span.className = 'pill';
+        span.textContent = text;
+        configPills.appendChild(span);
+      });
+    }
+
+    async function loadHistory() {
+      historyRoot.innerHTML = '<div class="muted">불러오는 중...</div>';
+      const response = await fetch('/v1/history?limit=8');
+      const payload = await response.json();
+      const items = payload.items || [];
+      if (!items.length) {
+        historyRoot.innerHTML = '<div class="muted">아직 작업 이력이 없습니다.</div>';
+        return;
+      }
+      historyRoot.innerHTML = '';
+      items.forEach((item) => {
+        const card = document.createElement('div');
+        card.className = 'history-item';
+        const title = document.createElement('strong');
+        title.textContent = `${item.status.toUpperCase()} · ${item.input?.file_name || 'unknown'}`;
+        const meta = document.createElement('div');
+        meta.className = 'muted';
+        meta.textContent = `${new Date(item.updated_at).toLocaleString()} · ${item.output?.mime_type || item.input?.mime_type || '-'}`;
+        const buttonRow = document.createElement('div');
+        buttonRow.className = 'actions';
+        const inspectButton = document.createElement('button');
+        inspectButton.className = 'secondary';
+        inspectButton.textContent = '상태 보기';
+        inspectButton.type = 'button';
+        inspectButton.addEventListener('click', () => waitForCompletion(item.job_id || item.request_id));
+        buttonRow.appendChild(inspectButton);
+        if (item.output?.download_url) {
+          const link = document.createElement('a');
+          link.className = 'download-link';
+          link.href = item.output.download_url;
+          link.textContent = '파일 다운로드';
+          link.target = '_blank';
+          buttonRow.appendChild(link);
+        }
+        card.appendChild(title);
+        card.appendChild(meta);
+        card.appendChild(buttonRow);
+        historyRoot.appendChild(card);
+      });
+    }
+
+    function renderMetadata(metadata) {
+      resultJson.textContent = JSON.stringify(metadata, null, 2);
+      if (metadata.output?.download_url) {
+        addDownloadLink(metadata.output.download_url, metadata.output.file_name || 'masked-result');
+      }
+    }
+
+    function addDownloadLink(url, filename) {
+      if (!url) {
+        return;
+      }
+      clearDownloads();
+      const link = document.createElement('a');
+      link.className = 'download-link';
+      link.href = url;
+      link.target = '_blank';
+      link.textContent = `결과 다운로드: ${filename}`;
+      downloadActions.appendChild(link);
+    }
+
+    function clearDownloads() {
+      downloadActions.innerHTML = '';
+    }
+
+    function setBusy(isBusy) {
+      processNowButton.disabled = isBusy;
+      createJobButton.disabled = isBusy;
+      refreshHistoryButton.disabled = isBusy;
+      chooseFileButton.disabled = isBusy;
+    }
+
+    function setStatus(message, tone) {
+      statusBox.textContent = message;
+      statusBox.className = `status${tone === 'ok' ? ' ok' : tone === 'error' ? ' error' : ''}`;
+    }
+
+    function formatBytes(bytes) {
+      if (!bytes) {
+        return '0 B';
+      }
+      const units = ['B', 'KB', 'MB', 'GB'];
+      let value = bytes;
+      let unitIndex = 0;
+      while (value >= 1024 && unitIndex < units.length - 1) {
+        value /= 1024;
+        unitIndex += 1;
+      }
+      return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+    }
+
+    function extractError(payload) {
+      if (!payload) {
+        return '알 수 없는 오류가 발생했습니다.';
+      }
+      if (payload.error?.message) {
+        return payload.error.message;
+      }
+      if (payload.message) {
+        return payload.message;
+      }
+      if (payload.error) {
+        return typeof payload.error === 'string' ? payload.error : JSON.stringify(payload.error);
+      }
+      return '요청 처리 중 오류가 발생했습니다.';
+    }
+
+    bootstrap().catch((error) => {
+      setStatus(error.message || '초기화 실패', 'error');
+    });
+  </script>
+</body>
+</html>

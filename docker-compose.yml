@@ -1,0 +1,20 @@
+services:
+  pii-masker:
+    image: pii-masker:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "18080:8080"
+    environment:
+      PII_MASKER_ADDR: ":8080"
+      PII_MASKER_PUBLIC_BASE_URL: "http://localhost:18080"
+      PII_MASKER_STORAGE_DIR: "/app/data"
+      PII_MASKER_ENABLE_EMBEDDED_UPSTAGE_MOCK: "true"
+      PII_MASKER_UPSTAGE_BASE_URL: "http://127.0.0.1:8080/internal/mock/upstage/inference"
+      PII_MASKER_DEFAULT_MODEL: "pii"
+      PII_MASKER_DEFAULT_LANG: "ko"
+      PII_MASKER_DEFAULT_SCHEMA: "oac"
+      PII_MASKER_ENABLE_DEBUG: "true"
+    volumes:
+      - ./data:/app/data
