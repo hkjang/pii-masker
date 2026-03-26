@@ -50,23 +50,10 @@ func BuildFieldEntries(payload any) []FieldEntry {
 func collectFieldEntriesRecursive(value any, seen map[string]struct{}, entries *[]FieldEntry) {
 	switch typed := value.(type) {
 	case map[string]any:
-		key := normalizeFieldKey(extractFieldValue(typed["key"]))
-		if key == "" {
-			key = normalizeFieldKey(extractFieldValue(typed["name"]))
-		}
-		if key == "" {
-			key = normalizeFieldKey(extractFieldValue(typed["label"]))
-		}
-
-		fieldValue := extractFieldValue(typed["refinedValue"])
-		if fieldValue == "" {
-			fieldValue = extractFieldValue(typed["value"])
-		}
-		if fieldValue == "" {
-			fieldValue = extractFieldValue(typed["chips"])
-		}
-		if fieldValue == "" {
-			fieldValue = extractFieldValue(typed["content"])
+		key := extractEntityKey(typed)
+		fieldValue := extractEntityValue(typed)
+		if key == "" && fieldValue != "" && hasGeometryHints(typed) {
+			key = "generic"
 		}
 		if key != "" && fieldValue != "" {
 			signature := key + "\x00" + fieldValue
@@ -85,7 +72,7 @@ func collectFieldEntriesRecursive(value any, seen map[string]struct{}, entries *
 					entry.Confidence = confidence
 					entry.HasConfidence = true
 				}
-				if pageNumber, ok := intValue(typed["pageNumber"]); ok {
+				if pageNumber, ok := extractEntityPageNumber(typed); ok {
 					entry.PageNumber = pageNumber
 				}
 				seen[signature] = struct{}{}
@@ -111,20 +98,17 @@ func CollectMaskRegions(payload any) []Region {
 func collectMaskRegionsRecursive(value any, regions *[]Region) {
 	switch typed := value.(type) {
 	case map[string]any:
-		key := strings.TrimSpace(extractFieldValue(typed["key"]))
-		fieldValue := extractFieldValue(typed["refinedValue"])
-		if fieldValue == "" {
-			fieldValue = extractFieldValue(typed["value"])
-		}
-		if fieldValue == "" {
-			fieldValue = extractFieldValue(typed["content"])
+		key := extractEntityKey(typed)
+		fieldValue := extractEntityValue(typed)
+		if key == "" && fieldValue != "" && hasGeometryHints(typed) {
+			key = "generic"
 		}
 		if key != "" && fieldValue != "" {
 			masked := MaskValue(key, fieldValue)
 			spans := ComputeMaskedRuneSpans(fieldValue, masked.MaskedValue)
-			bboxes := parseBoundingBoxes(typed["boundingBoxes"])
+			bboxes := parseBoundingBoxes(extractGeometryCandidate(typed))
 			entityPage := 0
-			if pageNumber, ok := intValue(typed["pageNumber"]); ok && pageNumber > 0 {
+			if pageNumber, ok := extractEntityPageNumber(typed); ok && pageNumber > 0 {
 				entityPage = pageNumber
 			}
 			for _, bbox := range bboxes {
@@ -191,30 +175,32 @@ type parsedBBox struct {
 }
 
 func parseBoundingBoxes(raw any) []parsedBBox {
-	arr, ok := raw.([]any)
-	if !ok || len(arr) == 0 {
+	switch typed := unwrapJSONValue(raw).(type) {
+	case nil:
+		return nil
+	case map[string]any:
+		if bbox, ok := parsePageVerticesObject(typed); ok {
+			return []parsedBBox{bbox}
+		}
+		if poly, ok := parsePolygonObject(typed); ok {
+			return []parsedBBox{{Polygon: poly, PageNumber: extractPageNumberFromMap(typed)}}
+		}
+		if poly, ok := parseRectObject(typed); ok {
+			return []parsedBBox{{Polygon: poly, PageNumber: extractPageNumberFromMap(typed)}}
+		}
+		return nil
+	case []any:
+		if len(typed) == 0 {
+			return nil
+		}
+		var result []parsedBBox
+		for _, item := range typed {
+			result = append(result, parseBoundingBoxes(item)...)
+		}
+		return result
+	default:
 		return nil
 	}
-	var result []parsedBBox
-	for _, item := range arr {
-		if bbox, ok := parsePageVerticesObject(item); ok {
-			result = append(result, bbox)
-			continue
-		}
-		if poly, ok := parsePolygonPoints(item); ok {
-			result = append(result, parsedBBox{Polygon: poly})
-			continue
-		}
-		if poly, ok := parseRectObject(item); ok {
-			result = append(result, parsedBBox{Polygon: poly})
-			continue
-		}
-		if poly, ok := parseFlatCoords(item); ok {
-			result = append(result, parsedBBox{Polygon: poly})
-			continue
-		}
-	}
-	return result
 }
 
 func parsePolygonPoints(item any) ([4][2]float64, bool) {
@@ -224,18 +210,43 @@ func parsePolygonPoints(item any) ([4][2]float64, bool) {
 	}
 	var poly [4][2]float64
 	for index, ptRaw := range polyArr {
-		ptArr, ok := ptRaw.([]any)
-		if !ok || len(ptArr) != 2 {
+		if ptArr, ok := ptRaw.([]any); ok && len(ptArr) == 2 {
+			x, xOK := toFloat64(ptArr[0])
+			y, yOK := toFloat64(ptArr[1])
+			if !xOK || !yOK {
+				return [4][2]float64{}, false
+			}
+			poly[index] = [2]float64{x, y}
+			continue
+		}
+		ptMap, ok := ptRaw.(map[string]any)
+		if !ok {
 			return [4][2]float64{}, false
 		}
-		x, xOK := toFloat64(ptArr[0])
-		y, yOK := toFloat64(ptArr[1])
+		x, xOK := toFloat64(ptMap["x"])
+		y, yOK := toFloat64(ptMap["y"])
 		if !xOK || !yOK {
 			return [4][2]float64{}, false
 		}
 		poly[index] = [2]float64{x, y}
 	}
 	return poly, true
+}
+
+func parsePolygonObject(item any) ([4][2]float64, bool) {
+	m, ok := item.(map[string]any)
+	if !ok {
+		return [4][2]float64{}, false
+	}
+	for _, key := range []string{"polygon", "poly", "points", "quad", "coordinates"} {
+		if poly, ok := parsePolygonPoints(m[key]); ok {
+			return poly, true
+		}
+		if poly, ok := parseFlatCoords(m[key]); ok {
+			return poly, true
+		}
+	}
+	return [4][2]float64{}, false
 }
 
 func parseRectObject(item any) ([4][2]float64, bool) {
@@ -287,28 +298,12 @@ func parsePageVerticesObject(item any) (parsedBBox, bool) {
 	if !ok {
 		return parsedBBox{}, false
 	}
-	verts, ok := m["vertices"].([]any)
-	if !ok || len(verts) != 4 {
-		return parsedBBox{}, false
-	}
-	var poly [4][2]float64
-	for index, vertex := range verts {
-		vertexMap, ok := vertex.(map[string]any)
-		if !ok {
-			return parsedBBox{}, false
+	for _, key := range []string{"vertices", "points"} {
+		if poly, ok := parsePolygonPoints(m[key]); ok {
+			return parsedBBox{Polygon: poly, PageNumber: extractPageNumberFromMap(m)}, true
 		}
-		x, xOK := toFloat64(vertexMap["x"])
-		y, yOK := toFloat64(vertexMap["y"])
-		if !xOK || !yOK {
-			return parsedBBox{}, false
-		}
-		poly[index] = [2]float64{x, y}
 	}
-	pageNumber := 0
-	if value, ok := intValue(m["page"]); ok && value > 0 {
-		pageNumber = value
-	}
-	return parsedBBox{Polygon: poly, PageNumber: pageNumber}, true
+	return parsedBBox{}, false
 }
 
 func ExtractPageSizes(payload any) map[int]PageSize {
@@ -506,26 +501,123 @@ func createBlackPNG(width, height int) []byte {
 }
 
 func ParsePayload(raw json.RawMessage, debugBody string) any {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed != "" {
-		var payload any
-		if err := json.Unmarshal(raw, &payload); err == nil {
-			return payload
-		}
+	if payload := parseJSONPayload(raw); payload != nil {
+		return unwrapPayloadEnvelope(payload)
 	}
-	debugBody = strings.TrimSpace(debugBody)
-	if debugBody == "" {
-		return nil
-	}
-	var payload any
-	if err := json.Unmarshal([]byte(debugBody), &payload); err == nil {
-		return payload
+	if payload := parseJSONPayload([]byte(strings.TrimSpace(debugBody))); payload != nil {
+		return unwrapPayloadEnvelope(payload)
 	}
 	return nil
 }
 
+func parseJSONPayload(raw []byte) any {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return nil
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return nil
+	}
+	return payload
+}
+
+func unwrapPayloadEnvelope(value any) any {
+	current := value
+	for range 8 {
+		switch typed := current.(type) {
+		case string:
+			next := parseJSONPayload([]byte(typed))
+			if next == nil {
+				return current
+			}
+			current = next
+		case map[string]any:
+			switch {
+			case looksLikeEnvelopeMap(typed) && typed["result"] != nil:
+				current = typed["result"]
+			case looksLikeEnvelopeMap(typed) && typed["payload"] != nil:
+				current = typed["payload"]
+			case looksLikeEnvelopeMap(typed) && typed["data"] != nil:
+				current = typed["data"]
+			default:
+				return current
+			}
+		default:
+			return current
+		}
+	}
+	return current
+}
+
+func looksLikeEnvelopeMap(value map[string]any) bool {
+	for _, key := range []string{"type", "api", "model", "usage", "content", "elements", "status", "result"} {
+		if _, ok := value[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func unwrapJSONValue(value any) any {
+	switch typed := value.(type) {
+	case string:
+		if parsed := parseJSONPayload([]byte(typed)); parsed != nil {
+			return parsed
+		}
+		return value
+	default:
+		return value
+	}
+}
+
 func normalizeFieldKey(value string) string {
 	return strings.TrimSpace(value)
+}
+
+func extractEntityKey(value map[string]any) string {
+	for _, key := range []string{"key", "name", "label", "fieldName", "fieldType", "type", "category", "class"} {
+		if extracted := normalizeFieldKey(extractFieldValue(value[key])); extracted != "" {
+			return extracted
+		}
+	}
+	return ""
+}
+
+func extractEntityValue(value map[string]any) string {
+	for _, key := range []string{"refinedValue", "value", "normalizedValue", "rawValue", "text", "content", "ocrText", "chips", "label"} {
+		if extracted := extractFieldValue(value[key]); extracted != "" {
+			return extracted
+		}
+	}
+	return ""
+}
+
+func extractGeometryCandidate(value map[string]any) any {
+	for _, key := range []string{"boundingBoxes", "boundingBox", "bounding_boxes", "bounding_box", "bbox", "bboxes", "box", "boxes", "polygon", "poly", "vertices", "points", "quad", "coordinates", "position"} {
+		if candidate, ok := value[key]; ok && candidate != nil {
+			return candidate
+		}
+	}
+	return nil
+}
+
+func hasGeometryHints(value map[string]any) bool {
+	return extractGeometryCandidate(value) != nil
+}
+
+func extractEntityPageNumber(value map[string]any) (int, bool) {
+	pageNumber := extractPageNumberFromMap(value)
+	return pageNumber, pageNumber > 0
+}
+
+func extractPageNumberFromMap(value map[string]any) int {
+	for _, key := range []string{"pageNumber", "page", "pageNo", "pageIndex", "page_index"} {
+		if pageNumber, ok := intValue(value[key]); ok && pageNumber > 0 {
+			return pageNumber
+		}
+	}
+	return 0
 }
 
 func extractFieldValue(value any) string {

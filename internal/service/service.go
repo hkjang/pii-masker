@@ -195,6 +195,27 @@ func (s *Service) process(ctx context.Context, requestID string, input ProcessIn
 	regions := masking.CollectMaskRegions(payload)
 	fieldEntries := masking.BuildFieldEntries(payload)
 	appliedRules, summary := summarizeFields(fieldEntries)
+	metadata.MaskPolicy.AppliedRules = appliedRules
+	metadata.PIISummary = summary
+	metadata.Engine = core.EngineInfo{
+		Provider:       "upstage",
+		Model:          defaultIfEmpty(result.Response.Model, defaultIfEmpty(input.Options.Model, s.config.Upstage.Model)),
+		Schema:         detectSchema(payload),
+		DurationMS:     duration.Milliseconds(),
+		UpstreamStatus: upstreamStatus,
+	}
+	if s.config.Debug.EnableDebug {
+		metadata.Engine.Debug = &core.DebugInfo{
+			Request:  marshalDebug(result.RequestDebug),
+			Response: marshalDebug(result.ResponseDebug),
+		}
+	}
+
+	if len(summary) > 0 && len(regions) == 0 {
+		err = fmt.Errorf("PII fields were detected but the upstream response did not contain usable bounding boxes for partial visual masking")
+		metadata.Error = mapError(err)
+		return metadata, nil, err
+	}
 
 	maskedContent := input.Attachment.Content
 	if len(regions) > 0 {
@@ -210,29 +231,19 @@ func (s *Service) process(ctx context.Context, requestID string, input ProcessIn
 			metadata.Error = mapError(err)
 			return metadata, nil, err
 		}
+		if bytes.Equal(maskedContent, input.Attachment.Content) {
+			err = fmt.Errorf("masking detected drawable regions but produced an output identical to the original document")
+			metadata.Error = mapError(err)
+			return metadata, nil, err
+		}
 	}
 
 	metadata.Status = "completed"
-	metadata.MaskPolicy.AppliedRules = appliedRules
-	metadata.PIISummary = summary
 	metadata.Output = core.FileDescriptor{
 		FileName: document.MaskedFilename(input.Attachment.Name),
 		MIMEType: input.Attachment.MIMEType,
 		Size:     int64(len(maskedContent)),
 		Pages:    pages,
-	}
-	metadata.Engine = core.EngineInfo{
-		Provider:       "upstage",
-		Model:          defaultIfEmpty(result.Response.Model, defaultIfEmpty(input.Options.Model, s.config.Upstage.Model)),
-		Schema:         detectSchema(payload),
-		DurationMS:     duration.Milliseconds(),
-		UpstreamStatus: upstreamStatus,
-	}
-	if s.config.Debug.EnableDebug {
-		metadata.Engine.Debug = &core.DebugInfo{
-			Request:  marshalDebug(result.RequestDebug),
-			Response: marshalDebug(result.ResponseDebug),
-		}
 	}
 	metadata.UpdatedAt = time.Now().UTC()
 
