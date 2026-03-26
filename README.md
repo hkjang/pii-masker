@@ -107,3 +107,17 @@ $env:PII_MASKER_BASE_URL="http://127.0.0.1:18080"
 ```
 
 기본값으로 `pii-masker:latest` 이미지를 `pii-masker-image.tar.gz`로 내보냅니다.
+
+## tar.gz 이미지로 바로 실행
+
+```sh
+sh ./scripts/run-from-archive.sh ./pii-masker-image.tar.gz
+```
+
+필요하면 환경 변수로 포트와 컨테이너 이름을 바꿀 수 있습니다.
+
+```sh
+HOST_PORT=28080 CONTAINER_NAME=pii-masker-demo sh ./scripts/run-from-archive.sh
+```
+
+같은 이름의 컨테이너가 이미 있으면 기본적으로 중단하고, `FORCE_RECREATE=1`을 주면 기존 컨테이너를 지우고 다시 띄웁니다.
