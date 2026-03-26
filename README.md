@@ -114,10 +114,16 @@ $env:PII_MASKER_BASE_URL="http://127.0.0.1:18080"
 sh ./scripts/run-from-archive.sh ./pii-masker-image.tar.gz
 ```
 
-필요하면 환경 변수로 포트와 컨테이너 이름을 바꿀 수 있습니다.
+기본값은 Docker named volume을 써서 권한 문제를 피합니다. 호스트 디렉터리에 직접 저장하고 싶으면 `DATA_DIR`를 지정하면 됩니다.
+
+```sh
+DATA_DIR=/srv/pii-masker-data sh ./scripts/run-from-archive.sh
+```
+
+필요하면 환경 변수로 포트와 컨테이너 이름도 바꿀 수 있습니다.
 
 ```sh
 HOST_PORT=28080 CONTAINER_NAME=pii-masker-demo sh ./scripts/run-from-archive.sh
 ```
 
-같은 이름의 컨테이너가 이미 있으면 기본적으로 중단하고, `FORCE_RECREATE=1`을 주면 기존 컨테이너를 지우고 다시 띄웁니다.
+같은 이름의 컨테이너가 이미 있으면 기본적으로 중단하고, `FORCE_RECREATE=1`을 주면 기존 컨테이너를 지우고 다시 띄웁니다. 바인드 마운트를 쓸 때는 스크립트가 `jobs`, `logs` 디렉터리를 미리 만들고 쓰기 권한도 한 번 맞춰 줍니다.

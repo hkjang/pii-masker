@@ -10,7 +10,8 @@ IMAGE_REF=${IMAGE_REF:-pii-masker:latest}
 CONTAINER_NAME=${CONTAINER_NAME:-pii-masker}
 HOST_PORT=${HOST_PORT:-18080}
 CONTAINER_PORT=${CONTAINER_PORT:-8080}
-DATA_DIR=${DATA_DIR:-"$ROOT_DIR/data"}
+DATA_DIR=${DATA_DIR:-}
+VOLUME_NAME=${VOLUME_NAME:-"$CONTAINER_NAME-data"}
 PUBLIC_BASE_URL=${PII_MASKER_PUBLIC_BASE_URL:-"http://localhost:$HOST_PORT"}
 FORCE_RECREATE=${FORCE_RECREATE:-0}
 
@@ -23,8 +24,6 @@ if [ ! -f "$ARCHIVE_PATH" ]; then
   echo "image archive not found: $ARCHIVE_PATH" >&2
   exit 1
 fi
-
-mkdir -p "$DATA_DIR"
 
 echo "Loading image archive: $ARCHIVE_PATH"
 LOAD_OUTPUT=$(docker load -i "$ARCHIVE_PATH")
@@ -49,11 +48,23 @@ if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
   fi
 fi
 
-echo "Starting container: $CONTAINER_NAME"
-docker run -d \
+MOUNT_DESCRIPTION=
+set -- docker run -d \
   --name "$CONTAINER_NAME" \
-  -p "$HOST_PORT:$CONTAINER_PORT" \
-  -v "$DATA_DIR:/app/data" \
+  -p "$HOST_PORT:$CONTAINER_PORT"
+
+if [ -n "$DATA_DIR" ]; then
+  mkdir -p "$DATA_DIR" "$DATA_DIR/jobs" "$DATA_DIR/logs"
+  chmod 0777 "$DATA_DIR" "$DATA_DIR/jobs" "$DATA_DIR/logs" 2>/dev/null || true
+  set -- "$@" -v "$DATA_DIR:/app/data"
+  MOUNT_DESCRIPTION=$DATA_DIR
+else
+  set -- "$@" -v "$VOLUME_NAME:/app/data"
+  MOUNT_DESCRIPTION=$VOLUME_NAME
+fi
+
+echo "Starting container: $CONTAINER_NAME"
+set -- "$@" \
   -e PII_MASKER_ADDR=":$CONTAINER_PORT" \
   -e PII_MASKER_PUBLIC_BASE_URL="$PUBLIC_BASE_URL" \
   -e PII_MASKER_STORAGE_DIR=/app/data \
@@ -65,8 +76,10 @@ docker run -d \
   -e PII_MASKER_ENABLE_DEBUG=true \
   "$IMAGE_TO_RUN"
 
+"$@"
+
 printf '\n'
 echo "PII Masker is starting."
 echo "UI:     $PUBLIC_BASE_URL/"
 echo "Health: $PUBLIC_BASE_URL/v1/health"
-echo "Data:   $DATA_DIR"
+echo "Data:   $MOUNT_DESCRIPTION"
