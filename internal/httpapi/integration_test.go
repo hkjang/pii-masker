@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"mime"
@@ -68,6 +69,43 @@ func TestMaskEndpointReturnsMaskedPNG(t *testing.T) {
 	whiteR, whiteG, whiteB, _ := img.At(45, 28).RGBA()
 	if whiteR != 0xffff || whiteG != 0xffff || whiteB != 0xffff {
 		t.Fatalf("expected unmasked pixel to remain white, got %d %d %d", whiteR, whiteG, whiteB)
+	}
+}
+
+func TestMaskEndpointReturnsMaskedJPEG(t *testing.T) {
+	t.Parallel()
+
+	serverURL := startAppServer(t)
+	jpegBytes := createBlankJPEG(t, 400, 200)
+
+	requestBody, contentType := buildMultipartBody(t, "sample.jpg", "image/jpeg", jpegBytes, nil)
+	response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+
+	metadata, fileBytes := parseMultipartMaskResponse(t, response)
+	if metadata.Status != "completed" {
+		t.Fatalf("expected completed status, got %q", metadata.Status)
+	}
+	if metadata.Output.MIMEType != "image/jpeg" {
+		t.Fatalf("unexpected output mime: %s", metadata.Output.MIMEType)
+	}
+
+	img, _, err := image.Decode(bytes.NewReader(fileBytes))
+	if err != nil {
+		t.Fatalf("decode masked jpeg: %v", err)
+	}
+
+	r, g, b, _ := img.At(75, 28).RGBA()
+	if r > 0x1111 || g > 0x1111 || b > 0x1111 {
+		t.Fatalf("expected masked jpeg pixel to be near black, got %d %d %d", r, g, b)
 	}
 }
 
@@ -208,7 +246,7 @@ func startAppServer(t *testing.T) string {
 		Limits: config.LimitsConfig{
 			MaxFileSizeBytes: 5 * 1024 * 1024,
 			MaxPages:         10,
-			SupportedMIMEs:   []string{"application/pdf", "image/png"},
+			SupportedMIMEs:   []string{"application/pdf", "image/png", "image/jpeg"},
 		},
 		Storage: config.StorageConfig{
 			RootDir: t.TempDir(),
@@ -296,6 +334,23 @@ func createBlankPNG(t *testing.T, width, height int) []byte {
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
 		t.Fatalf("encode png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func createBlankJPEG(t *testing.T, width, height int) []byte {
+	t.Helper()
+
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			img.Set(x, y, color.White)
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95}); err != nil {
+		t.Fatalf("encode jpeg: %v", err)
 	}
 	return buf.Bytes()
 }

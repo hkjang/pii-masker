@@ -247,7 +247,7 @@
   <main class="shell">
     <section class="hero">
       <span class="eyebrow">PII Masker Playground</span>
-      <h1>PDF/PNG 파일을 올리고 바로 마스킹 결과를 확인하세요.</h1>
+      <h1>PDF/PNG/JPG/JPEG 파일을 올리고 바로 마스킹 결과를 확인하세요.</h1>
       <p>이 페이지는 현재 API 서버 위에 직접 붙어 있습니다. 파일 업로드, 비동기 작업 생성, 상태 조회, 결과 다운로드까지 한 화면에서 테스트할 수 있습니다.</p>
       <div class="pill-row" id="config-pills"></div>
     </section>
@@ -256,9 +256,9 @@
       <div class="panel">
         <h2>업로드 테스트</h2>
         <div id="upload-zone" class="upload-zone">
-          <strong>PDF 또는 PNG 파일을 끌어다 놓거나 선택하세요</strong>
+          <strong>PDF, PNG, JPG, JPEG 파일을 끌어다 놓거나 선택하세요</strong>
           <p class="file-meta" id="file-meta">선택된 파일이 없습니다.</p>
-          <input id="file-input" type="file" accept=".pdf,.png,application/pdf,image/png" hidden>
+          <input id="file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" hidden>
           <div class="actions" style="justify-content:center; margin-top:16px;">
             <button class="secondary" id="choose-file" type="button">파일 선택</button>
           </div>

@@ -8,7 +8,7 @@
   - 브라우저에서 바로 업로드 테스트 가능한 Playground 페이지 제공
 - `POST /v1/mask`
   - `multipart/form-data` 업로드
-  - `file` 필드로 `PDF` 또는 `PNG` 전송
+  - `file` 필드로 `PDF`, `PNG`, `JPG`, `JPEG` 전송
   - 응답은 `multipart/mixed`
   - 1번 파트: JSON 메타데이터
   - 2번 파트: 마스킹된 파일 바이너리
@@ -93,7 +93,7 @@ docker compose up --build -d
 
 기본 `docker-compose.yml`은 호스트 `18080` 포트로 노출되며, 임베디드 mock inference 엔드포인트를 켜 둔 상태로 올라오므로 외부 Upstage 서버 없이도 바로 API 테스트가 가능합니다.
 
-브라우저 테스트 페이지는 `http://127.0.0.1:18080/`에서 확인할 수 있습니다.
+브라우저 테스트 페이지는 `http://127.0.0.1:18080/`에서 확인할 수 있고, `PDF`, `PNG`, `JPG`, `JPEG` 업로드를 지원합니다.
 
 ```powershell
 $env:PII_MASKER_BASE_URL="http://127.0.0.1:18080"

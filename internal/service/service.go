@@ -222,7 +222,7 @@ func (s *Service) process(ctx context.Context, requestID string, input ProcessIn
 		switch {
 		case strings.Contains(strings.ToLower(input.Attachment.MIMEType), "pdf"):
 			maskedContent, err = masking.MaskPDFFile(input.Attachment.Content, regions, pageSizes)
-		case strings.Contains(strings.ToLower(input.Attachment.MIMEType), "png"):
+		case strings.HasPrefix(strings.ToLower(input.Attachment.MIMEType), "image/"):
 			maskedContent, err = masking.MaskImageFile(input.Attachment.Content, input.Attachment.MIMEType, regions, pageSizes)
 		default:
 			err = fmt.Errorf("unsupported mask output type %q", input.Attachment.MIMEType)
@@ -277,7 +277,7 @@ func (s *Service) countPages(attachment document.Attachment) (int, error) {
 			return 0, fmt.Errorf("uploaded pdf exceeds the maximum page count of %d", s.config.Limits.MaxPages)
 		}
 		return len(dims), nil
-	case strings.Contains(strings.ToLower(attachment.MIMEType), "png"):
+	case strings.HasPrefix(strings.ToLower(attachment.MIMEType), "image/"):
 		return 1, nil
 	default:
 		return 0, fmt.Errorf("unsupported file type %q", attachment.MIMEType)

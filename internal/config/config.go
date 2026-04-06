@@ -99,7 +99,7 @@ func Load() (Config, error) {
 		Limits: LimitsConfig{
 			MaxFileSizeBytes: int64(envInt("PII_MASKER_MAX_FILE_SIZE_MB", defaultMaxFileSizeMB)) * 1024 * 1024,
 			MaxPages:         envInt("PII_MASKER_MAX_PAGES", defaultMaxPages),
-			SupportedMIMEs:   []string{"application/pdf", "image/png"},
+			SupportedMIMEs:   []string{"application/pdf", "image/png", "image/jpeg"},
 		},
 		Storage: StorageConfig{
 			RootDir: rootDir,

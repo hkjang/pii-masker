@@ -49,7 +49,7 @@ func TestProcessSyncFailsClosedWhenPIIHasNoBoundingBoxes(t *testing.T) {
 		Limits: config.LimitsConfig{
 			MaxFileSizeBytes: 5 * 1024 * 1024,
 			MaxPages:         5,
-			SupportedMIMEs:   []string{"image/png"},
+			SupportedMIMEs:   []string{"image/png", "image/jpeg"},
 		},
 		Storage: config.StorageConfig{
 			RootDir: t.TempDir(),

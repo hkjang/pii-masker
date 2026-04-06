@@ -28,8 +28,9 @@ func NewAttachment(name, declaredMIME string, content []byte) Attachment {
 }
 
 func ValidateMIMEType(mimeType string, allowed []string) error {
+	mimeType = normalizeMIMEType(mimeType)
 	for _, candidate := range allowed {
-		if strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(mimeType)) {
+		if strings.EqualFold(normalizeMIMEType(candidate), mimeType) {
 			return nil
 		}
 	}
@@ -38,22 +39,35 @@ func ValidateMIMEType(mimeType string, allowed []string) error {
 
 func detectAttachmentMIMEType(name, declaredMIME string, content []byte) string {
 	if value := strings.TrimSpace(declaredMIME); value != "" && !strings.EqualFold(value, "application/octet-stream") {
-		return value
+		return normalizeMIMEType(value)
 	}
 	if len(content) > 0 {
 		if detected := http.DetectContentType(content); detected != "" && detected != "application/octet-stream" {
-			return detected
+			return normalizeMIMEType(detected)
 		}
 	}
 	if extension := strings.TrimSpace(filepath.Ext(name)); extension != "" {
 		if detected := mime.TypeByExtension(extension); detected != "" {
-			return detected
+			return normalizeMIMEType(detected)
 		}
 	}
 	if len(content) > 0 {
-		return http.DetectContentType(content)
+		return normalizeMIMEType(http.DetectContentType(content))
 	}
 	return "application/octet-stream"
+}
+
+func normalizeMIMEType(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if mediaType, _, err := mime.ParseMediaType(value); err == nil {
+		value = mediaType
+	}
+	switch value {
+	case "image/jpg", "image/pjpeg":
+		return "image/jpeg"
+	default:
+		return value
+	}
 }
 
 func sanitizeUploadFilename(name string) string {
