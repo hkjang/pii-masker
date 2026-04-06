@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -55,6 +56,17 @@ func UpstageHandler() http.Handler {
 
 		if len(content) == 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "document part is required"})
+			return
+		}
+
+		mimeType = normalizeMockMIMEType(mimeType)
+		if !isMockSupportedMIMEType(mimeType) {
+			writeJSON(w, http.StatusUnsupportedMediaType, map[string]any{
+				"error": map[string]any{
+					"message": "unsupported document format",
+					"detail":  "embedded mock accepts only PDF and PNG upstream payloads",
+				},
+			})
 			return
 		}
 
@@ -130,6 +142,28 @@ func detectDimensions(content []byte, mimeType string) (float64, float64, int) {
 		return float64(cfg.Width), float64(cfg.Height), 1
 	}
 	return 800, 600, 1
+}
+
+func normalizeMockMIMEType(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if mediaType, _, err := mime.ParseMediaType(value); err == nil {
+		value = mediaType
+	}
+	switch value {
+	case "image/jpg", "image/pjpeg":
+		return "image/jpeg"
+	default:
+		return value
+	}
+}
+
+func isMockSupportedMIMEType(mimeType string) bool {
+	switch mimeType {
+	case "application/pdf", "image/png":
+		return true
+	default:
+		return false
+	}
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload any) {

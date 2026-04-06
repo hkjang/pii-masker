@@ -7,12 +7,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	"image/png"
 	"io"
 	"mime/multipart"
 	"net"
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -142,10 +146,28 @@ func (e *CallError) toConnectionStatus() ConnectionStatus {
 
 func (c *Client) ParseDocument(ctx context.Context, attachment document.Attachment, options ParseOptions) (DocumentResult, int, time.Duration, error) {
 	fields := buildFormFields(c.config, options)
-	requestDebug := buildRequestDebug(c.config, fields, attachment)
+	upstreamAttachment, err := prepareUpstreamAttachment(attachment)
+	requestDebug := buildRequestDebug(c.config, fields, upstreamAttachment)
 
 	startedAt := time.Now()
-	result, statusCode, err := c.performParseRequest(ctx, attachment, fields, requestDebug)
+	if err != nil {
+		elapsed := time.Since(startedAt)
+		callErr := newCallError(
+			"upstream_prepare_failed",
+			"JPG/JPEG 파일을 PII 추론용 형식으로 변환하지 못했습니다.",
+			err.Error(),
+			"손상되지 않은 JPG/JPEG 파일인지 확인한 뒤 다시 시도하세요.",
+			c.config.BaseURL,
+			0,
+			false,
+		)
+		return DocumentResult{
+			Attachment:   attachment,
+			RequestDebug: requestDebug,
+		}, 0, elapsed, callErr.withDebug(requestDebug, ResponseDebug{})
+	}
+
+	result, statusCode, err := c.performParseRequest(ctx, attachment, upstreamAttachment, fields, requestDebug)
 	elapsed := time.Since(startedAt)
 	return result, statusCode, elapsed, err
 }
@@ -196,7 +218,7 @@ func (c *Client) TestConnection(ctx context.Context) (ConnectionStatus, error) {
 	}, nil
 }
 
-func (c *Client) performParseRequest(ctx context.Context, attachment document.Attachment, fields map[string]string, requestDebug RequestDebug) (DocumentResult, int, error) {
+func (c *Client) performParseRequest(ctx context.Context, originalAttachment document.Attachment, upstreamAttachment document.Attachment, fields map[string]string, requestDebug RequestDebug) (DocumentResult, int, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
@@ -206,11 +228,11 @@ func (c *Client) performParseRequest(ctx context.Context, attachment document.At
 		}
 	}
 
-	part, err := createDocumentPart(writer, attachment)
+	part, err := createDocumentPart(writer, upstreamAttachment)
 	if err != nil {
 		return DocumentResult{}, 0, err
 	}
-	if _, err := io.Copy(part, bytes.NewReader(attachment.Content)); err != nil {
+	if _, err := io.Copy(part, bytes.NewReader(upstreamAttachment.Content)); err != nil {
 		return DocumentResult{}, 0, err
 	}
 	if err := writer.Close(); err != nil {
@@ -252,11 +274,43 @@ func (c *Client) performParseRequest(ctx context.Context, attachment document.At
 	}
 
 	return DocumentResult{
-		Attachment:    attachment,
+		Attachment:    originalAttachment,
 		Response:      parsed,
 		ResponseDebug: buildResponseDebug(response.StatusCode, response.Header, responseBody, nil),
 		RequestDebug:  requestDebug,
 	}, response.StatusCode, nil
+}
+
+func prepareUpstreamAttachment(attachment document.Attachment) (document.Attachment, error) {
+	if !strings.EqualFold(strings.TrimSpace(attachment.MIMEType), "image/jpeg") {
+		return attachment, nil
+	}
+
+	imageValue, _, err := image.Decode(bytes.NewReader(attachment.Content))
+	if err != nil {
+		return document.Attachment{}, fmt.Errorf("failed to decode jpeg: %w", err)
+	}
+
+	var buffer bytes.Buffer
+	if err := png.Encode(&buffer, imageValue); err != nil {
+		return document.Attachment{}, fmt.Errorf("failed to encode png: %w", err)
+	}
+
+	converted := attachment
+	converted.Content = buffer.Bytes()
+	converted.Size = int64(buffer.Len())
+	converted.MIMEType = "image/png"
+	converted.Extension = "png"
+	converted.Name = replaceExtension(attachment.Name, ".png")
+	return converted, nil
+}
+
+func replaceExtension(name, ext string) string {
+	baseExt := filepath.Ext(name)
+	if baseExt == "" {
+		return name + ext
+	}
+	return strings.TrimSuffix(name, baseExt) + ext
 }
 
 func buildFormFields(cfg config.UpstageConfig, options ParseOptions) map[string]string {
