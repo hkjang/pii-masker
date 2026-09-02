@@ -3,6 +3,7 @@ package masking
 import (
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -22,13 +23,21 @@ var (
 	ipPattern            = regexp.MustCompile(`^(\d{1,3}\.\d{1,3}\.)(\d{1,3})(\.\d{1,3})$`)
 )
 
+// MaskValue masks value according to the rule matched by key. The returned masked
+// value keeps the same rune positions as the original value so that
+// ComputeMaskedRuneSpans can map it back onto the document bounding box.
 func MaskValue(key, value string) MaskedValue {
-	normalizedKey := normalizeKey(key)
 	trimmedValue := strings.TrimSpace(value)
 	if trimmedValue == "" {
 		return MaskedValue{MaskedValue: value, Rule: AppliedRule{RuleName: "empty", DisplayName: "빈 값"}}
 	}
 
+	masked := maskTrimmedValue(normalizeKey(key), trimmedValue)
+	masked.MaskedValue = restoreSurroundingSpace(value, trimmedValue, masked.MaskedValue)
+	return masked
+}
+
+func maskTrimmedValue(normalizedKey, trimmedValue string) MaskedValue {
 	switch {
 	case containsAny(normalizedKey, "주민등록번호", "rrn"):
 		return wrapMasked(maskDigitsAfter(trimmedValue, 6), "resident_registration_number", "주민등록번호 뒤 7자리 마스킹")
@@ -76,13 +85,16 @@ func SupportedRuleNames() []string {
 	}
 }
 
+// ComputeMaskedRuneSpans reports the rune ranges of original that masked hides.
+// When the two values are not rune aligned the ranges cannot be trusted, so no
+// span is reported and the caller falls back to covering the whole field.
 func ComputeMaskedRuneSpans(original, masked string) [][2]int {
 	originalRunes := []rune(original)
 	maskedRunes := []rune(masked)
-	maxLen := len(originalRunes)
-	if len(maskedRunes) < maxLen {
-		maxLen = len(maskedRunes)
+	if len(originalRunes) != len(maskedRunes) {
+		return nil
 	}
+	maxLen := len(originalRunes)
 
 	spans := make([][2]int, 0, 4)
 	start := -1
@@ -112,6 +124,18 @@ func wrapMasked(value, ruleName, displayName string) MaskedValue {
 			DisplayName: displayName,
 		},
 	}
+}
+
+// restoreSurroundingSpace puts back the whitespace that was trimmed before masking
+// so that maskedTrimmed lines up with the runes of the original value.
+func restoreSurroundingSpace(original, trimmed, maskedTrimmed string) string {
+	if original == trimmed {
+		return maskedTrimmed
+	}
+	withoutLeading := strings.TrimLeftFunc(original, unicode.IsSpace)
+	leading := original[:len(original)-len(withoutLeading)]
+	trailing := withoutLeading[len(strings.TrimRightFunc(withoutLeading, unicode.IsSpace)):]
+	return leading + maskedTrimmed + trailing
 }
 
 func normalizeKey(value string) string {
@@ -295,13 +319,13 @@ func maskIPAddress(value string) string {
 }
 
 func maskAddress(value string) string {
-	tokens := strings.Fields(value)
+	tokens := splitAddressTokens(value)
 	if len(tokens) == 0 {
 		return value
 	}
 	cutoff := len(tokens)
 	for index, token := range tokens {
-		if hasAddressBoundarySuffix(token) {
+		if hasAddressBoundarySuffix(token.text) {
 			cutoff = index + 1
 			break
 		}
@@ -315,10 +339,49 @@ func maskAddress(value string) string {
 		}
 		cutoff = len(tokens) - 1
 	}
-	for index := cutoff; index < len(tokens); index++ {
-		tokens[index] = maskAllVisible(tokens[index])
+
+	// The original separators are kept as-is so the masked value stays rune
+	// aligned with the value drawn on the document.
+	var builder strings.Builder
+	builder.Grow(len(value))
+	cursor := 0
+	for index, token := range tokens {
+		builder.WriteString(value[cursor:token.start])
+		if index >= cutoff {
+			builder.WriteString(maskAllVisible(token.text))
+		} else {
+			builder.WriteString(token.text)
+		}
+		cursor = token.start + len(token.text)
 	}
-	return strings.Join(tokens, " ")
+	builder.WriteString(value[cursor:])
+	return builder.String()
+}
+
+type addressToken struct {
+	text  string
+	start int
+}
+
+func splitAddressTokens(value string) []addressToken {
+	tokens := make([]addressToken, 0, 4)
+	start := -1
+	for index, character := range value {
+		if unicode.IsSpace(character) {
+			if start >= 0 {
+				tokens = append(tokens, addressToken{text: value[start:index], start: start})
+				start = -1
+			}
+			continue
+		}
+		if start < 0 {
+			start = index
+		}
+	}
+	if start >= 0 {
+		tokens = append(tokens, addressToken{text: value[start:], start: start})
+	}
+	return tokens
 }
 
 func hasAddressBoundarySuffix(token string) bool {
