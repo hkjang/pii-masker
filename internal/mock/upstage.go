@@ -14,6 +14,12 @@ import (
 	pdfmodel "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
+// pdfcpu keeps its config path in a package level variable, so it is disabled once
+// at startup instead of on every request to avoid concurrent writes.
+func init() {
+	pdfmodel.ConfigPath = "disable"
+}
+
 func UpstageHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -129,7 +135,6 @@ func buildPayload(width, height float64, pages int) map[string]any {
 
 func detectDimensions(content []byte, mimeType string) (float64, float64, int) {
 	if strings.Contains(strings.ToLower(mimeType), "pdf") {
-		pdfmodel.ConfigPath = "disable"
 		conf := pdfmodel.NewDefaultConfiguration()
 		conf.ValidationMode = pdfmodel.ValidationRelaxed
 		if dims, err := api.PageDims(bytes.NewReader(content), conf); err == nil && len(dims) > 0 {

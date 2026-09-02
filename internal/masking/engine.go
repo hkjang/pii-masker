@@ -20,6 +20,12 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
 
+// pdfcpu keeps its config path in a package level variable, so it is disabled once
+// at startup instead of on every request to avoid concurrent writes.
+func init() {
+	pdfmodel.ConfigPath = "disable"
+}
+
 type Region struct {
 	PageNumber int
 	Polygon    [4][2]float64
@@ -424,7 +430,6 @@ func MaskPDFFile(content []byte, regions []Region, pageSizes map[int]PageSize) (
 }
 
 func maskPDFFileInternal(content []byte, regions []Region, pageSizes map[int]PageSize) ([]byte, error) {
-	pdfmodel.ConfigPath = "disable"
 	conf := pdfmodel.NewDefaultConfiguration()
 	conf.ValidationMode = pdfmodel.ValidationRelaxed
 
