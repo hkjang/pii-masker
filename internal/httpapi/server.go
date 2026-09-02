@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -121,6 +122,14 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	job, err := s.service.CreateJob(r.Context(), input)
 	if err != nil {
+		var invalidInput *service.InvalidInputError
+		if errors.As(err, &invalidInput) {
+			writeError(w, http.StatusBadRequest, &core.APIError{
+				Code:    "invalid_request",
+				Message: err.Error(),
+			})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, &core.APIError{
 			Code:    "job_create_failed",
 			Message: err.Error(),

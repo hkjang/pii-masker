@@ -22,6 +22,12 @@ import (
 	"pii-masker/internal/upstage"
 )
 
+// pdfcpu keeps its config path in a package level variable, so it is disabled once
+// at startup instead of on every request to avoid concurrent writes.
+func init() {
+	pdfmodel.ConfigPath = "disable"
+}
+
 type Service struct {
 	config   config.Config
 	client   *upstage.Client
@@ -31,6 +37,19 @@ type Service struct {
 type ProcessInput struct {
 	Attachment document.Attachment
 	Options    upstage.ParseOptions
+}
+
+// InvalidInputError marks an upload that is rejected before any work is queued or persisted.
+type InvalidInputError struct {
+	Err error
+}
+
+func (e *InvalidInputError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *InvalidInputError) Unwrap() error {
+	return e.Err
 }
 
 func New(cfg config.Config, client *upstage.Client, jobStore *jobs.Store) *Service {
@@ -47,9 +66,16 @@ func (s *Service) ProcessSync(ctx context.Context, input ProcessInput) (*core.Pr
 }
 
 func (s *Service) CreateJob(ctx context.Context, input ProcessInput) (*core.JobRecord, error) {
+	if err := s.validateAttachment(input.Attachment); err != nil {
+		return nil, &InvalidInputError{Err: err}
+	}
+	pages, err := s.countPages(input.Attachment)
+	if err != nil {
+		return nil, &InvalidInputError{Err: err}
+	}
+
 	jobID := uuid.NewString()
 	now := time.Now().UTC()
-	pages, _ := s.countPages(input.Attachment)
 
 	inputPath, err := s.jobStore.WriteInputFile(jobID, input.Attachment.Name, input.Attachment.Content)
 	if err != nil {
@@ -266,7 +292,6 @@ func (s *Service) validateAttachment(attachment document.Attachment) error {
 func (s *Service) countPages(attachment document.Attachment) (int, error) {
 	switch {
 	case strings.Contains(strings.ToLower(attachment.MIMEType), "pdf"):
-		pdfmodel.ConfigPath = "disable"
 		conf := pdfmodel.NewDefaultConfiguration()
 		conf.ValidationMode = pdfmodel.ValidationRelaxed
 		dims, err := api.PageDims(bytes.NewReader(attachment.Content), conf)
