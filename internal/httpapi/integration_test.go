@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -221,7 +223,105 @@ func TestIndexPageIsServed(t *testing.T) {
 	}
 }
 
+func TestCreateJobRejectsUnsupportedTypeWithoutPersisting(t *testing.T) {
+	t.Parallel()
+
+	serverURL, cfg := startAppServerWithConfig(t, nil)
+
+	requestBody, contentType := buildMultipartBody(t, "notes.txt", "text/plain", []byte("주민등록번호 800901-1234567"), nil)
+	response, err := http.Post(serverURL+"/v1/jobs", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/jobs: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	if code := decodeErrorCode(t, response); code != "invalid_request" {
+		t.Fatalf("unexpected error code %q", code)
+	}
+	assertNoStoredJobs(t, cfg.Storage.RootDir)
+}
+
+func TestCreateJobRejectsOversizedUploadWithoutPersisting(t *testing.T) {
+	t.Parallel()
+
+	serverURL, cfg := startAppServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Limits.MaxFileSizeBytes = 256
+	})
+
+	requestBody, contentType := buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 200, 200), nil)
+	response, err := http.Post(serverURL+"/v1/jobs", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/jobs: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	if code := decodeErrorCode(t, response); code != "invalid_request" {
+		t.Fatalf("unexpected error code %q", code)
+	}
+	assertNoStoredJobs(t, cfg.Storage.RootDir)
+}
+
+func TestCreateJobRejectsPDFExceedingPageLimitWithoutPersisting(t *testing.T) {
+	t.Parallel()
+
+	serverURL, cfg := startAppServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Limits.MaxPages = 0
+	})
+
+	requestBody, contentType := buildMultipartBody(t, "broken.pdf", "application/pdf", []byte("%PDF-1.4\nnot a real pdf\n"), nil)
+	response, err := http.Post(serverURL+"/v1/jobs", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/jobs: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	assertNoStoredJobs(t, cfg.Storage.RootDir)
+}
+
+func decodeErrorCode(t *testing.T, response *http.Response) string {
+	t.Helper()
+
+	var payload struct {
+		Error core.APIError `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode error payload: %v", err)
+	}
+	return payload.Error.Code
+}
+
+func assertNoStoredJobs(t *testing.T, rootDir string) {
+	t.Helper()
+
+	entries, err := os.ReadDir(filepath.Join(rootDir, "jobs"))
+	if err != nil {
+		t.Fatalf("read jobs dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no persisted job, got %d entries", len(entries))
+	}
+}
+
 func startAppServer(t *testing.T) string {
+	t.Helper()
+
+	serverURL, _ := startAppServerWithConfig(t, nil)
+	return serverURL
+}
+
+func startAppServerWithConfig(t *testing.T, customize func(*config.Config)) (string, config.Config) {
 	t.Helper()
 
 	upstreamMux := http.NewServeMux()
@@ -255,6 +355,9 @@ func startAppServer(t *testing.T) string {
 			EnableDebug: true,
 		},
 	}
+	if customize != nil {
+		customize(&cfg)
+	}
 
 	application, err := app.New(cfg)
 	if err != nil {
@@ -262,7 +365,7 @@ func startAppServer(t *testing.T) string {
 	}
 	server := httptest.NewServer(application.Handler())
 	t.Cleanup(server.Close)
-	return server.URL
+	return server.URL, cfg
 }
 
 func buildMultipartBody(t *testing.T, filename, contentType string, content []byte, fields map[string]string) (*bytes.Buffer, string) {
