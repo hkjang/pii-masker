@@ -290,6 +290,78 @@ func TestCreateJobRejectsPDFExceedingPageLimitWithoutPersisting(t *testing.T) {
 	assertNoStoredJobs(t, cfg.Storage.RootDir)
 }
 
+func TestMaskRejectsRequestBodyBeyondTheUploadLimit(t *testing.T) {
+	t.Parallel()
+
+	serverURL, _ := startAppServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Limits.MaxFileSizeBytes = 4096
+	})
+
+	requestBody, contentType := buildMultipartBody(t, "huge.png", "image/png", make([]byte, 512*1024), nil)
+	response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusRequestEntityTooLarge {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	if code := decodeErrorCode(t, response); code != "payload_too_large" {
+		t.Fatalf("unexpected error code %q", code)
+	}
+}
+
+func TestCreateJobRejectsRequestBodyBeyondTheUploadLimitWithoutPersisting(t *testing.T) {
+	t.Parallel()
+
+	serverURL, cfg := startAppServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Limits.MaxFileSizeBytes = 4096
+	})
+
+	requestBody, contentType := buildMultipartBody(t, "huge.png", "image/png", make([]byte, 512*1024), nil)
+	response, err := http.Post(serverURL+"/v1/jobs", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/jobs: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusRequestEntityTooLarge {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	if code := decodeErrorCode(t, response); code != "payload_too_large" {
+		t.Fatalf("unexpected error code %q", code)
+	}
+	assertNoStoredJobs(t, cfg.Storage.RootDir)
+}
+
+func TestMaskAcceptsUploadUsingTheFullConfiguredFileSize(t *testing.T) {
+	t.Parallel()
+
+	pngBytes := createBlankPNG(t, 400, 200)
+	serverURL, _ := startAppServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Limits.MaxFileSizeBytes = int64(len(pngBytes))
+	})
+
+	requestBody, contentType := buildMultipartBody(t, "sample.png", "image/png", pngBytes, map[string]string{"lang": "ko"})
+	response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	metadata, _ := parseMultipartMaskResponse(t, response)
+	if metadata.Status != "completed" {
+		t.Fatalf("expected completed status, got %q", metadata.Status)
+	}
+}
+
 func decodeErrorCode(t *testing.T, response *http.Response) string {
 	t.Helper()
 
