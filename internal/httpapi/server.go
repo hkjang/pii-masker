@@ -21,10 +21,29 @@ import (
 	"pii-masker/internal/upstage"
 )
 
+const (
+	// Multipart framing and the small text fields sent alongside the upload are the
+	// only bytes allowed on top of the configured file size limit.
+	uploadBodyHeadroomBytes = 64 * 1024
+	// Parts above this size are spilled to a temp file instead of being buffered in
+	// memory, so a large upload cannot pin the whole file in RAM twice.
+	uploadMemoryBytes = 8 * 1024 * 1024
+)
+
 type Server struct {
 	config  config.Config
 	service *service.Service
 	router  *mux.Router
+}
+
+// payloadTooLargeError marks a request body that was cut off before the upload
+// could be parsed, which is reported as 413 instead of a generic 400.
+type payloadTooLargeError struct {
+	limit int64
+}
+
+func (e *payloadTooLargeError) Error() string {
+	return fmt.Sprintf("request body exceeds the maximum size of %d bytes", e.limit)
 }
 
 func New(cfg config.Config, svc *service.Service) *Server {
@@ -87,12 +106,9 @@ func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMask(w http.ResponseWriter, r *http.Request) {
-	input, err := s.readProcessInput(r)
+	input, err := s.readProcessInput(w, r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, &core.APIError{
-			Code:    "invalid_request",
-			Message: err.Error(),
-		})
+		writeUploadError(w, err)
 		return
 	}
 
@@ -111,12 +127,9 @@ func (s *Server) handleMask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
-	input, err := s.readProcessInput(r)
+	input, err := s.readProcessInput(w, r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, &core.APIError{
-			Code:    "invalid_request",
-			Message: err.Error(),
-		})
+		writeUploadError(w, err)
 		return
 	}
 
@@ -222,8 +235,14 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": response})
 }
 
-func (s *Server) readProcessInput(r *http.Request) (service.ProcessInput, error) {
-	if err := r.ParseMultipartForm(s.config.Limits.MaxFileSizeBytes + 1024*1024); err != nil {
+func (s *Server) readProcessInput(w http.ResponseWriter, r *http.Request) (service.ProcessInput, error) {
+	bodyLimit := s.config.Limits.MaxFileSizeBytes + uploadBodyHeadroomBytes
+	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
+	if err := r.ParseMultipartForm(uploadMemoryBytes); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			return service.ProcessInput{}, &payloadTooLargeError{limit: bodyLimit}
+		}
 		return service.ProcessInput{}, fmt.Errorf("invalid multipart form: %w", err)
 	}
 	file, header, err := r.FormFile("file")
@@ -278,6 +297,21 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func writeUploadError(w http.ResponseWriter, err error) {
+	var tooLarge *payloadTooLargeError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, &core.APIError{
+			Code:    "payload_too_large",
+			Message: err.Error(),
+		})
+		return
+	}
+	writeError(w, http.StatusBadRequest, &core.APIError{
+		Code:    "invalid_request",
+		Message: err.Error(),
+	})
 }
 
 func writeError(w http.ResponseWriter, statusCode int, apiErr *core.APIError) {

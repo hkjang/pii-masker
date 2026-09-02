@@ -27,6 +27,8 @@
 - `GET /v1/config/public`
   - 공개 설정 조회
 
+업로드 요청(`POST /v1/mask`, `POST /v1/jobs`)의 본문은 `PII_MASKER_MAX_FILE_SIZE_MB`에 멀티파트 여유분 64KB를 더한 크기에서 잘립니다. 그보다 큰 본문은 끝까지 읽지 않고 `413`(`payload_too_large`)로 즉시 거절합니다.
+
 ## 마스킹 규칙
 
 다음 12개 기준을 구현했습니다.
