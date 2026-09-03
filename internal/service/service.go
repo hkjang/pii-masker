@@ -286,6 +286,11 @@ func (s *Service) validateAttachment(attachment document.Attachment) error {
 	if err := document.ValidateMIMEType(attachment.MIMEType, s.config.Limits.SupportedMIMEs); err != nil {
 		return err
 	}
+	if strings.HasPrefix(strings.ToLower(attachment.MIMEType), "image/") {
+		if err := document.ValidateImageDimensions(attachment.Content); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
