@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"image"
-	_ "image/jpeg"
 	"image/png"
 	"io"
 	"mime/multipart"
@@ -286,7 +284,7 @@ func prepareUpstreamAttachment(attachment document.Attachment) (document.Attachm
 		return attachment, nil
 	}
 
-	imageValue, _, err := image.Decode(bytes.NewReader(attachment.Content))
+	imageValue, _, err := document.DecodeImage(attachment.Content)
 	if err != nil {
 		return document.Attachment{}, fmt.Errorf("failed to decode jpeg: %w", err)
 	}

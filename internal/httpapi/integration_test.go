@@ -2,7 +2,9 @@ package httpapi_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -362,6 +364,57 @@ func TestMaskAcceptsUploadUsingTheFullConfiguredFileSize(t *testing.T) {
 	}
 }
 
+func TestMaskRejectsImageWithOversizedDeclaredResolution(t *testing.T) {
+	t.Parallel()
+
+	serverURL := startAppServer(t)
+
+	requestBody, contentType := buildMultipartBody(t, "bomb.png", "image/png", createPixelBombPNG(t, 40000, 40000), nil)
+	response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+
+	var metadata core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+		t.Fatalf("decode metadata: %v", err)
+	}
+	if metadata.Error == nil || metadata.Error.Code != "processing_failed" {
+		t.Fatalf("unexpected metadata error %#v", metadata.Error)
+	}
+	if !strings.Contains(metadata.Error.Message, "exceeds the maximum") {
+		t.Fatalf("unexpected error message %q", metadata.Error.Message)
+	}
+}
+
+func TestCreateJobRejectsImageWithOversizedDeclaredResolutionWithoutPersisting(t *testing.T) {
+	t.Parallel()
+
+	serverURL, cfg := startAppServerWithConfig(t, nil)
+
+	requestBody, contentType := buildMultipartBody(t, "bomb.png", "image/png", createPixelBombPNG(t, 40000, 40000), nil)
+	response, err := http.Post(serverURL+"/v1/jobs", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/jobs: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	if code := decodeErrorCode(t, response); code != "invalid_request" {
+		t.Fatalf("unexpected error code %q", code)
+	}
+	assertNoStoredJobs(t, cfg.Storage.RootDir)
+}
+
 func decodeErrorCode(t *testing.T, response *http.Response) string {
 	t.Helper()
 
@@ -511,6 +564,25 @@ func createBlankPNG(t *testing.T, width, height int) []byte {
 		t.Fatalf("encode png: %v", err)
 	}
 	return buf.Bytes()
+}
+
+// createPixelBombPNG rewrites the IHDR header of a 1x1 PNG so that it declares a
+// huge resolution while the file itself stays tiny, which is how a decompression
+// bomb reaches the image decoder.
+func createPixelBombPNG(t *testing.T, width, height uint32) []byte {
+	t.Helper()
+
+	content := createBlankPNG(t, 1, 1)
+	const ihdrTypeOffset = 12
+	const ihdrDataOffset = 16
+	if header := string(content[ihdrTypeOffset:ihdrDataOffset]); header != "IHDR" {
+		t.Fatalf("unexpected first png chunk %q", header)
+	}
+
+	binary.BigEndian.PutUint32(content[ihdrDataOffset:], width)
+	binary.BigEndian.PutUint32(content[ihdrDataOffset+4:], height)
+	binary.BigEndian.PutUint32(content[ihdrDataOffset+13:], crc32.ChecksumIEEE(content[ihdrTypeOffset:ihdrDataOffset+13]))
+	return content
 }
 
 func createBlankJPEG(t *testing.T, width, height int) []byte {

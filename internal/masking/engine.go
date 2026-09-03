@@ -12,12 +12,11 @@ import (
 	"math"
 	"strings"
 
-	_ "golang.org/x/image/bmp"
-	_ "golang.org/x/image/tiff"
-
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	pdfmodel "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
+
+	"pii-masker/internal/document"
 )
 
 // pdfcpu keeps its config path in a package level variable, so it is disabled once
@@ -376,7 +375,7 @@ func polygonBounds(poly [4][2]float64) (minX, minY, maxX, maxY float64) {
 }
 
 func MaskImageFile(content []byte, mimeType string, regions []Region, pageSizes map[int]PageSize) ([]byte, error) {
-	img, format, err := image.Decode(bytes.NewReader(content))
+	img, format, err := document.DecodeImage(content)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode image: %w", err)
 	}
