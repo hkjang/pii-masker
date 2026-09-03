@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -28,10 +29,18 @@ func init() {
 	pdfmodel.ConfigPath = "disable"
 }
 
+// defaultMaxConcurrentJobs is the fallback used when the caller did not configure
+// a job concurrency limit, so a Service is never built with an unbounded runner.
+const defaultMaxConcurrentJobs = 4
+
 type Service struct {
 	config   config.Config
 	client   *upstage.Client
 	jobStore *jobs.Store
+	// jobSlots bounds how many queued jobs run at once. Waiting runners hold no
+	// document bytes, because each one reads its input back from disk only after
+	// it acquires a slot.
+	jobSlots chan struct{}
 }
 
 type ProcessInput struct {
@@ -53,10 +62,15 @@ func (e *InvalidInputError) Unwrap() error {
 }
 
 func New(cfg config.Config, client *upstage.Client, jobStore *jobs.Store) *Service {
+	slots := cfg.Limits.MaxConcurrentJobs
+	if slots <= 0 {
+		slots = defaultMaxConcurrentJobs
+	}
 	return &Service{
 		config:   cfg,
 		client:   client,
 		jobStore: jobStore,
+		jobSlots: make(chan struct{}, slots),
 	}
 }
 
@@ -108,13 +122,32 @@ func (s *Service) CreateJob(ctx context.Context, input ProcessInput) (*core.JobR
 		return nil, err
 	}
 
-	go s.runJob(jobID, input)
+	go s.runJob(jobID, input.Options)
 	return job, nil
 }
 
-func (s *Service) runJob(jobID string, input ProcessInput) {
+// runJob waits for a free slot and only then reloads the stored upload, so a burst
+// of queued jobs costs one goroutine each instead of one full document in memory.
+func (s *Service) runJob(jobID string, options upstage.ParseOptions) {
+	s.jobSlots <- struct{}{}
+	defer func() { <-s.jobSlots }()
+
 	job, ok, err := s.jobStore.Get(jobID)
 	if err != nil || !ok {
+		return
+	}
+
+	input, err := loadJobInput(job, options)
+	if err != nil {
+		job.Metadata.Status = "failed"
+		job.Metadata.UpdatedAt = time.Now().UTC()
+		job.Metadata.Error = &core.APIError{
+			Code:      "storage_read_failed",
+			Message:   "저장된 입력 파일을 읽지 못했습니다.",
+			Detail:    err.Error(),
+			Retryable: true,
+		}
+		_ = s.jobStore.Save(job)
 		return
 	}
 
@@ -147,6 +180,23 @@ func (s *Service) runJob(jobID string, input ProcessInput) {
 	}
 
 	_ = s.jobStore.Save(job)
+}
+
+// loadJobInput rebuilds the processing input from the upload that CreateJob already
+// persisted. The stored name and MIME type were sanitized on the way in, so passing
+// them back through NewAttachment is a no-op that keeps the derived fields in sync.
+func loadJobInput(job *core.JobRecord, options upstage.ParseOptions) (ProcessInput, error) {
+	if job.InputPath == "" {
+		return ProcessInput{}, fmt.Errorf("job %s has no stored input file", job.ID)
+	}
+	content, err := os.ReadFile(job.InputPath)
+	if err != nil {
+		return ProcessInput{}, err
+	}
+	return ProcessInput{
+		Attachment: document.NewAttachment(job.Metadata.Input.FileName, job.Metadata.Input.MIMEType, content),
+		Options:    options,
+	}, nil
 }
 
 func (s *Service) GetJob(id string) (*core.JobRecord, bool, error) {

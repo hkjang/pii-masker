@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode"
@@ -510,6 +512,119 @@ func TestJobResultSanitizesInjectedUploadFilename(t *testing.T) {
 	}
 }
 
+// TestAsyncJobsRunWithBoundedConcurrency holds every upstream call open, so the
+// number of simultaneous upstream requests is exactly the number of accepted jobs
+// the runner lets execute at once. Without a limit all of them would run together
+// and each would pin its whole document in memory.
+func TestAsyncJobsRunWithBoundedConcurrency(t *testing.T) {
+	t.Parallel()
+
+	const (
+		concurrencyLimit = 2
+		jobCount         = 5
+	)
+
+	var (
+		inFlight    int64
+		maxInFlight int64
+		release     = make(chan struct{})
+		releaseOnce sync.Once
+		releaseGate = func() { releaseOnce.Do(func() { close(release) }) }
+		upstream    = mock.UpstageHandler()
+	)
+	gated := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := atomic.AddInt64(&inFlight, 1)
+		for {
+			observed := atomic.LoadInt64(&maxInFlight)
+			if current <= observed || atomic.CompareAndSwapInt64(&maxInFlight, observed, current) {
+				break
+			}
+		}
+		<-release
+		atomic.AddInt64(&inFlight, -1)
+		upstream.ServeHTTP(w, r)
+	})
+
+	serverURL, _ := startAppServerWithUpstream(t, gated, func(cfg *config.Config) {
+		cfg.Limits.MaxConcurrentJobs = concurrencyLimit
+		cfg.Upstage.Timeout = 60 * time.Second
+	})
+	// Registered after the servers so it runs before their cleanup: a failing
+	// assertion must not leave requests parked in the handler, or shutdown would
+	// block instead of reporting the failure.
+	t.Cleanup(releaseGate)
+
+	jobIDs := make([]string, 0, jobCount)
+	for range jobCount {
+		requestBody, contentType := buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 400, 200), nil)
+		response, err := http.Post(serverURL+"/v1/jobs", contentType, requestBody)
+		if err != nil {
+			t.Fatalf("post /v1/jobs: %v", err)
+		}
+		var metadata core.ProcessMetadata
+		decodeErr := json.NewDecoder(response.Body).Decode(&metadata)
+		response.Body.Close()
+		if response.StatusCode != http.StatusAccepted {
+			t.Fatalf("unexpected status %d", response.StatusCode)
+		}
+		if decodeErr != nil {
+			t.Fatalf("decode job metadata: %v", decodeErr)
+		}
+		jobIDs = append(jobIDs, metadata.JobID)
+	}
+
+	waitForCondition(t, "upstream to reach the concurrency limit", func() bool {
+		return atomic.LoadInt64(&inFlight) >= concurrencyLimit
+	})
+	// Give any runner that ignored the limit a chance to reach the upstream too.
+	time.Sleep(300 * time.Millisecond)
+	if observed := atomic.LoadInt64(&maxInFlight); observed != concurrencyLimit {
+		t.Fatalf("expected at most %d concurrent jobs, got %d", concurrencyLimit, observed)
+	}
+
+	releaseGate()
+	for _, jobID := range jobIDs {
+		waitForCondition(t, "job "+jobID+" to complete", func() bool {
+			return jobStatus(t, serverURL, jobID) == "completed"
+		})
+	}
+	if observed := atomic.LoadInt64(&maxInFlight); observed != concurrencyLimit {
+		t.Fatalf("expected at most %d concurrent jobs, got %d", concurrencyLimit, observed)
+	}
+}
+
+func waitForCondition(t *testing.T, description string, condition func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", description)
+}
+
+func jobStatus(t *testing.T, serverURL, jobID string) string {
+	t.Helper()
+
+	response, err := http.Get(serverURL + "/v1/jobs/" + url.PathEscape(jobID))
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	defer response.Body.Close()
+
+	var metadata core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+		t.Fatalf("decode job metadata: %v", err)
+	}
+	if metadata.Status == "failed" {
+		t.Fatalf("job %s failed: %#v", jobID, metadata.Error)
+	}
+	return metadata.Status
+}
+
 func waitForJobStatus(t *testing.T, serverURL, jobID, status string) core.ProcessMetadata {
 	t.Helper()
 
@@ -577,8 +692,14 @@ func startAppServer(t *testing.T) string {
 func startAppServerWithConfig(t *testing.T, customize func(*config.Config)) (string, config.Config) {
 	t.Helper()
 
+	return startAppServerWithUpstream(t, mock.UpstageHandler(), customize)
+}
+
+func startAppServerWithUpstream(t *testing.T, upstream http.Handler, customize func(*config.Config)) (string, config.Config) {
+	t.Helper()
+
 	upstreamMux := http.NewServeMux()
-	upstreamMux.Handle("/inference", mock.UpstageHandler())
+	upstreamMux.Handle("/inference", upstream)
 	upstreamServer := httptest.NewServer(upstreamMux)
 	t.Cleanup(upstreamServer.Close)
 

@@ -9,10 +9,13 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"pii-masker/internal/config"
+	"pii-masker/internal/core"
 	"pii-masker/internal/document"
 	"pii-masker/internal/jobs"
 	"pii-masker/internal/upstage"
@@ -75,6 +78,50 @@ func TestProcessSyncFailsClosedWhenPIIHasNoBoundingBoxes(t *testing.T) {
 	}
 	if len(metadata.PIISummary) != 1 {
 		t.Fatalf("expected pii summary to be preserved, got %#v", metadata.PIISummary)
+	}
+}
+
+func TestLoadJobInputReadsStoredUpload(t *testing.T) {
+	t.Parallel()
+
+	content := createWhitePNG(t, 20, 10)
+	inputPath := filepath.Join(t.TempDir(), "input_sample.png")
+	if err := os.WriteFile(inputPath, content, 0o644); err != nil {
+		t.Fatalf("write input file: %v", err)
+	}
+
+	job := &core.JobRecord{
+		ID: "job-1",
+		Metadata: core.ProcessMetadata{
+			Input: core.FileDescriptor{FileName: "sample.png", MIMEType: "image/png"},
+		},
+		InputPath: inputPath,
+	}
+
+	input, err := loadJobInput(job, upstage.ParseOptions{Model: "pii"})
+	if err != nil {
+		t.Fatalf("loadJobInput: %v", err)
+	}
+	if input.Attachment.Name != "sample.png" || input.Attachment.MIMEType != "image/png" {
+		t.Fatalf("unexpected attachment %#v", input.Attachment)
+	}
+	if input.Attachment.Size != int64(len(content)) || !bytes.Equal(input.Attachment.Content, content) {
+		t.Fatalf("expected stored bytes to be restored, got %d bytes", input.Attachment.Size)
+	}
+	if input.Options.Model != "pii" {
+		t.Fatalf("expected options to be preserved, got %#v", input.Options)
+	}
+}
+
+func TestLoadJobInputFailsWhenStoredUploadIsMissing(t *testing.T) {
+	t.Parallel()
+
+	if _, err := loadJobInput(&core.JobRecord{ID: "job-1"}, upstage.ParseOptions{}); err == nil {
+		t.Fatalf("expected an error when the job has no stored input path")
+	}
+	job := &core.JobRecord{ID: "job-1", InputPath: filepath.Join(t.TempDir(), "input_missing.png")}
+	if _, err := loadJobInput(job, upstage.ParseOptions{}); err == nil {
+		t.Fatalf("expected an error when the stored input file is gone")
 	}
 }
 
