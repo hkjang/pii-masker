@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/gorilla/mux"
 
@@ -204,7 +205,7 @@ func (s *Server) handleGetJobResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", job.Metadata.Output.MIMEType)
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, job.Metadata.Output.FileName))
+	w.Header().Set("Content-Disposition", attachmentDisposition(job.Metadata.Output.FileName))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(content)
 }
@@ -289,8 +290,27 @@ func (s *Server) writeMultipartResponse(w http.ResponseWriter, metadata *core.Pr
 func textPartHeader(filename, contentType string) textproto.MIMEHeader {
 	header := make(textproto.MIMEHeader)
 	header.Set("Content-Type", contentType)
-	header.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	header.Set("Content-Disposition", attachmentDisposition(filename))
 	return header
+}
+
+// attachmentDisposition quotes a file name for a Content-Disposition header.
+// Names are already sanitized when the upload is accepted, but multipart part
+// headers are written verbatim, so the characters that could end the quoted
+// string or the header line are dropped here as well.
+func attachmentDisposition(filename string) string {
+	var builder strings.Builder
+	builder.Grow(len(filename))
+	for _, r := range filename {
+		if r == '"' || r == '\\' || unicode.IsControl(r) {
+			continue
+		}
+		builder.WriteRune(r)
+	}
+	if builder.Len() == 0 {
+		return `attachment; filename="document"`
+	}
+	return fmt.Sprintf(`attachment; filename="%s"`, builder.String())
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
