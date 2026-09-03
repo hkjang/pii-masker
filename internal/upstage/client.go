@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"pii-masker/internal/config"
 	"pii-masker/internal/document"
@@ -360,9 +361,24 @@ func createDocumentPart(writer *multipart.Writer, attachment document.Attachment
 	return writer.CreatePart(headers)
 }
 
+// escapeMultipartValue prepares a value for a quoted multipart header parameter.
+// Control characters are dropped instead of escaped because a CR or LF would end
+// the header line and let the value inject headers into the upstream request.
 func escapeMultipartValue(value string) string {
-	replacer := strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
-	return replacer.Replace(value)
+	var builder strings.Builder
+	builder.Grow(len(value))
+	for _, r := range value {
+		switch {
+		case unicode.IsControl(r):
+			continue
+		case r == '\\', r == '"':
+			builder.WriteByte('\\')
+			builder.WriteRune(r)
+		default:
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
 }
 
 func applyAuthHeader(request *http.Request, cfg config.UpstageConfig) {
