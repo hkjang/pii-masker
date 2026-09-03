@@ -31,6 +31,8 @@
 
 이미지 업로드는 헤더에 적힌 해상도가 5천만 픽셀(50MP, 600dpi A4 스캔 이상)을 넘으면 픽셀 데이터를 디코딩하기 전에 `400`으로 거절합니다. 파일 크기는 작지만 거대한 해상도를 선언한 압축 폭탄이 디코딩 단계에서 메모리를 고갈시키는 것을 막기 위한 제한입니다.
 
+비동기 작업(`POST /v1/jobs`)은 동시에 `PII_MASKER_MAX_CONCURRENT_JOBS`개(기본 4개)만 실행합니다. 초과분은 `queued` 상태로 대기하다가 순서대로 실행되며, 대기 중인 작업은 문서 바이트를 메모리에 들고 있지 않고 차례가 오면 저장된 입력 파일을 다시 읽습니다. 업로드를 한꺼번에 몰아넣어 서버 메모리를 고갈시키는 것을 막기 위한 제한입니다.
+
 업로드 파일명은 경로 구분자, 제어문자(`CR`/`LF` 포함), 따옴표, 역슬래시를 제거하고 120바이트로 잘라서 사용합니다. 클라이언트는 파일명을 RFC 2231(`filename*=utf-8''...`)로 인코딩해 보낼 수 있어서, 디코딩된 이름에 개행이 섞이면 응답 `multipart` 파트 헤더나 추론 서버로 보내는 요청 헤더가 조작될 수 있기 때문입니다. 한글 등 비ASCII 파일명은 그대로 유지됩니다.
 
 ## 마스킹 규칙
@@ -64,6 +66,7 @@
 - `PII_MASKER_DEFAULT_TIMEOUT_SECONDS`
 - `PII_MASKER_MAX_FILE_SIZE_MB`
 - `PII_MASKER_MAX_PAGES`
+- `PII_MASKER_MAX_CONCURRENT_JOBS`
 - `PII_MASKER_DEFAULT_MODEL`
 - `PII_MASKER_DEFAULT_LANG`
 - `PII_MASKER_DEFAULT_SCHEMA`

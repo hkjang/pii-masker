@@ -15,9 +15,12 @@ const (
 	defaultTimeoutSeconds = 30
 	defaultMaxFileSizeMB  = 50
 	defaultMaxPages       = 20
-	defaultModel          = "pii"
-	defaultLang           = "ko"
-	defaultSchema         = "oac"
+	// Each running job decodes and re-renders a whole document, so only a few of
+	// them are allowed to hold that memory at the same time.
+	defaultMaxConcurrentJobs = 4
+	defaultModel             = "pii"
+	defaultLang              = "ko"
+	defaultSchema            = "oac"
 )
 
 type Config struct {
@@ -47,9 +50,10 @@ type UpstageConfig struct {
 }
 
 type LimitsConfig struct {
-	MaxFileSizeBytes int64
-	MaxPages         int
-	SupportedMIMEs   []string
+	MaxFileSizeBytes  int64
+	MaxPages          int
+	MaxConcurrentJobs int
+	SupportedMIMEs    []string
 }
 
 type StorageConfig struct {
@@ -97,9 +101,10 @@ func Load() (Config, error) {
 			Verbose:    envBool("PII_MASKER_DEFAULT_VERBOSE", false),
 		},
 		Limits: LimitsConfig{
-			MaxFileSizeBytes: int64(envInt("PII_MASKER_MAX_FILE_SIZE_MB", defaultMaxFileSizeMB)) * 1024 * 1024,
-			MaxPages:         envInt("PII_MASKER_MAX_PAGES", defaultMaxPages),
-			SupportedMIMEs:   []string{"application/pdf", "image/png", "image/jpeg"},
+			MaxFileSizeBytes:  int64(envInt("PII_MASKER_MAX_FILE_SIZE_MB", defaultMaxFileSizeMB)) * 1024 * 1024,
+			MaxPages:          envInt("PII_MASKER_MAX_PAGES", defaultMaxPages),
+			MaxConcurrentJobs: envInt("PII_MASKER_MAX_CONCURRENT_JOBS", defaultMaxConcurrentJobs),
+			SupportedMIMEs:    []string{"application/pdf", "image/png", "image/jpeg"},
 		},
 		Storage: StorageConfig{
 			RootDir: rootDir,
