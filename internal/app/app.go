@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"net/http"
 
 	"pii-masker/internal/config"
@@ -14,6 +15,8 @@ import (
 type App struct {
 	server *http.Server
 	api    *httpapi.Server
+	// stop ends the background workers that outlive a single request.
+	stop context.CancelFunc
 }
 
 func New(cfg config.Config) (*App, error) {
@@ -30,13 +33,22 @@ func New(cfg config.Config) (*App, error) {
 		apiServer.Mount("/internal/mock/upstage/", http.StripPrefix("/internal/mock/upstage", mock.UpstageHandler()))
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	svc.StartRetentionSweeper(ctx)
+
 	return &App{
 		server: &http.Server{
 			Addr:    cfg.Server.Address,
 			Handler: apiServer.Handler(),
 		},
-		api: apiServer,
+		api:  apiServer,
+		stop: cancel,
 	}, nil
+}
+
+// Close stops the background workers started by New.
+func (a *App) Close() {
+	a.stop()
 }
 
 func (a *App) Run() error {

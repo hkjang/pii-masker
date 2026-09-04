@@ -593,6 +593,80 @@ func TestAsyncJobsRunWithBoundedConcurrency(t *testing.T) {
 	}
 }
 
+func TestExpiredJobFilesArePurgedOnStartup(t *testing.T) {
+	t.Parallel()
+
+	var jobsDir string
+	now := time.Now().UTC()
+	serverURL, _ := startAppServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Storage.JobRetention = 24 * time.Hour
+		jobsDir = filepath.Join(cfg.Storage.RootDir, "jobs")
+		seedStoredJobFiles(t, jobsDir, "stale-job", now.Add(-48*time.Hour))
+		seedStoredJobFiles(t, jobsDir, "fresh-job", now.Add(-time.Minute))
+	})
+
+	waitForCondition(t, "the expired job directory to be removed", func() bool {
+		_, err := os.Stat(filepath.Join(jobsDir, "stale-job"))
+		return os.IsNotExist(err)
+	})
+
+	staleResponse, err := http.Get(serverURL + "/v1/jobs/stale-job")
+	if err != nil {
+		t.Fatalf("get expired job: %v", err)
+	}
+	defer staleResponse.Body.Close()
+	if staleResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected the expired job to be unknown, got %d", staleResponse.StatusCode)
+	}
+
+	if _, err := os.Stat(filepath.Join(jobsDir, "fresh-job", "input_sample.png")); err != nil {
+		t.Fatalf("expected the recent job files to be kept: %v", err)
+	}
+	freshResponse, err := http.Get(serverURL + "/v1/jobs/fresh-job")
+	if err != nil {
+		t.Fatalf("get recent job: %v", err)
+	}
+	defer freshResponse.Body.Close()
+	if freshResponse.StatusCode != http.StatusOK {
+		t.Fatalf("expected the recent job to be kept, got %d", freshResponse.StatusCode)
+	}
+}
+
+// seedStoredJobFiles writes a finished job straight to disk, the way a previous run of
+// the server would have left it behind.
+func seedStoredJobFiles(t *testing.T, jobsDir, jobID string, updatedAt time.Time) {
+	t.Helper()
+
+	jobDir := filepath.Join(jobsDir, jobID)
+	if err := os.MkdirAll(jobDir, 0o755); err != nil {
+		t.Fatalf("create job dir: %v", err)
+	}
+	record := core.JobRecord{
+		ID: jobID,
+		Metadata: core.ProcessMetadata{
+			RequestID: jobID,
+			JobID:     jobID,
+			Status:    "completed",
+			CreatedAt: updatedAt,
+			UpdatedAt: updatedAt,
+		},
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("marshal job record: %v", err)
+	}
+	files := map[string][]byte{
+		"job.json":                 raw,
+		"input_sample.png":         []byte("original"),
+		"output_sample_masked.png": []byte("masked"),
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(jobDir, name), content, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+}
+
 func waitForCondition(t *testing.T, description string, condition func() bool) {
 	t.Helper()
 
@@ -737,6 +811,7 @@ func startAppServerWithUpstream(t *testing.T, upstream http.Handler, customize f
 	if err != nil {
 		t.Fatalf("new app: %v", err)
 	}
+	t.Cleanup(application.Close)
 	server := httptest.NewServer(application.Handler())
 	t.Cleanup(server.Close)
 	return server.URL, cfg
