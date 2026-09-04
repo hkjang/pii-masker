@@ -756,6 +756,42 @@ func assertNoStoredJobs(t *testing.T, rootDir string) {
 	}
 }
 
+func TestMaskRejectsUpstreamHostOutsideAllowList(t *testing.T) {
+	t.Parallel()
+
+	reached := false
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	serverURL, _ := startAppServerWithUpstream(t, upstream, func(cfg *config.Config) {
+		cfg.Upstage.AllowHosts = []string{"api.upstage.ai"}
+	})
+
+	requestBody, contentType := buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 400, 200), nil)
+	response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusBadGateway {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+
+	var metadata core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+		t.Fatalf("decode metadata: %v", err)
+	}
+	if metadata.Error == nil || metadata.Error.Code != "upstream_host_not_allowed" {
+		t.Fatalf("unexpected error payload: %+v", metadata.Error)
+	}
+	if reached {
+		t.Fatal("the upload must not reach an upstream host outside the allow list")
+	}
+}
+
 func startAppServer(t *testing.T) string {
 	t.Helper()
 
