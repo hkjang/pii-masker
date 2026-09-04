@@ -77,6 +77,8 @@
 - `PII_MASKER_ENABLE_DEBUG`
 - `PII_MASKER_ENABLE_EMBEDDED_UPSTAGE_MOCK`
 
+`PII_MASKER_ALLOW_HOSTS`는 추론 요청을 보낼 수 있는 호스트 목록(쉼표 구분)입니다. 비워 두면 `PII_MASKER_UPSTAGE_BASE_URL`의 호스트만 허용합니다. 목록에 없는 호스트로 향하는 요청은 전송 전에 차단되며, 리다이렉트 응답도 같은 목록으로 검사하므로 업로드한 문서와 인증 토큰이 허용되지 않은 호스트로 따라가지 않습니다. 항목은 `api.upstage.ai`처럼 호스트만 적거나 `127.0.0.1:8080`처럼 포트까지 적을 수 있습니다.
+
 ## 로컬 실행
 
 ```powershell

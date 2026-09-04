@@ -24,8 +24,23 @@ import (
 	"pii-masker/internal/document"
 )
 
+// maxUpstreamRedirects bounds how far a redirect chain from the inference endpoint
+// may be followed before the request is abandoned.
+const maxUpstreamRedirects = 5
+
 type Client struct {
 	config config.UpstageConfig
+}
+
+// blockedHostError marks an upstream target that is not on the configured allow
+// list. It is also returned from CheckRedirect, so a redirect chain cannot carry
+// the uploaded document or the API token to a host the operator never allowed.
+type blockedHostError struct {
+	host string
+}
+
+func (e *blockedHostError) Error() string {
+	return fmt.Sprintf("host %q is not in the upstream allow list", e.host)
 }
 
 type ParseOptions struct {
@@ -172,6 +187,11 @@ func (c *Client) ParseDocument(ctx context.Context, attachment document.Attachme
 }
 
 func (c *Client) TestConnection(ctx context.Context) (ConnectionStatus, error) {
+	requestURL := buildRequestURL(c.config.BaseURL, c.config.Model)
+	if err := c.checkHostAllowed(requestURL); err != nil {
+		return classifyRequestError(requestURL, err).toConnectionStatus(), nil
+	}
+
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	if err := writer.WriteField("model", c.config.Model); err != nil {
@@ -181,7 +201,7 @@ func (c *Client) TestConnection(ctx context.Context) (ConnectionStatus, error) {
 		return ConnectionStatus{}, err
 	}
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, buildRequestURL(c.config.BaseURL, c.config.Model), &body)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, &body)
 	if err != nil {
 		return ConnectionStatus{}, err
 	}
@@ -218,6 +238,11 @@ func (c *Client) TestConnection(ctx context.Context) (ConnectionStatus, error) {
 }
 
 func (c *Client) performParseRequest(ctx context.Context, originalAttachment document.Attachment, upstreamAttachment document.Attachment, fields map[string]string, requestDebug RequestDebug) (DocumentResult, int, error) {
+	requestURL := buildRequestURL(c.config.BaseURL, fields["model"])
+	if err := c.checkHostAllowed(requestURL); err != nil {
+		return DocumentResult{}, 0, attachDebug(classifyRequestError(requestURL, err), requestDebug, ResponseDebug{})
+	}
+
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
@@ -238,7 +263,7 @@ func (c *Client) performParseRequest(ctx context.Context, originalAttachment doc
 		return DocumentResult{}, 0, err
 	}
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, buildRequestURL(c.config.BaseURL, fields["model"]), &body)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, &body)
 	if err != nil {
 		return DocumentResult{}, 0, fmt.Errorf("failed to build upstream request: %w", err)
 	}
@@ -397,7 +422,71 @@ func (c *Client) httpClient() *http.Client {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	return &http.Client{Timeout: timeout}
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if len(via) >= maxUpstreamRedirects {
+				return fmt.Errorf("stopped after %d redirects", maxUpstreamRedirects)
+			}
+			return c.checkURLAllowed(request.URL)
+		},
+	}
+}
+
+// allowedHosts lists the hosts this client may talk to. An empty configuration
+// falls back to the host of the configured base URL, so the client can never be
+// left without a target restriction.
+func (c *Client) allowedHosts() []string {
+	if len(c.config.AllowHosts) > 0 {
+		return c.config.AllowHosts
+	}
+	parsedURL, err := url.Parse(c.config.BaseURL)
+	if err != nil {
+		return nil
+	}
+	if host := parsedURL.Hostname(); host != "" {
+		return []string{host}
+	}
+	return nil
+}
+
+// checkHostAllowed rejects a target URL before any request body is built.
+func (c *Client) checkHostAllowed(rawURL string) error {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return &blockedHostError{host: rawURL}
+	}
+	return c.checkURLAllowed(parsedURL)
+}
+
+func (c *Client) checkURLAllowed(target *url.URL) error {
+	if hostAllowed(target, c.allowedHosts()) {
+		return nil
+	}
+	return &blockedHostError{host: target.Host}
+}
+
+// hostAllowed matches target against the allow list entries, which may be written
+// either as a bare host name or with an explicit port.
+func hostAllowed(target *url.URL, allowed []string) bool {
+	if target == nil {
+		return false
+	}
+	hostname := strings.ToLower(target.Hostname())
+	hostPort := strings.ToLower(target.Host)
+	if hostname == "" {
+		return false
+	}
+	for _, entry := range allowed {
+		entry = strings.ToLower(strings.TrimSpace(entry))
+		if entry == "" {
+			continue
+		}
+		if entry == hostname || entry == hostPort {
+			return true
+		}
+	}
+	return false
 }
 
 func cloneFields(fields map[string]string) map[string]string {
@@ -505,6 +594,14 @@ func classifyHTTPError(requestURL string, statusCode int, headers http.Header, b
 
 func classifyRequestError(requestURL string, err error) *CallError {
 	detail := strings.TrimSpace(err.Error())
+
+	// A blocked host is reported before the request leaves and from CheckRedirect,
+	// so both paths land here wrapped in the same *url.Error the transport returns.
+	var blockedHost *blockedHostError
+	if errors.As(err, &blockedHost) {
+		return newCallError("upstream_host_not_allowed", "허용되지 않은 호스트로 PII API를 호출하려고 했습니다.", detail, "PII_MASKER_ALLOW_HOSTS에 해당 호스트를 추가하거나 기본 URL을 확인하세요.", requestURL, 0, false)
+	}
+
 	var timeoutErr interface{ Timeout() bool }
 	if errors.As(err, &timeoutErr) && timeoutErr.Timeout() {
 		return newCallError("network_timeout", "PII API 서버 연결이 시간 초과되었습니다.", detail, "PII API 서버 상태와 네트워크 지연, 타임아웃 설정을 확인하세요.", requestURL, 0, true)
