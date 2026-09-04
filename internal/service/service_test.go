@@ -125,6 +125,151 @@ func TestLoadJobInputFailsWhenStoredUploadIsMissing(t *testing.T) {
 	}
 }
 
+func TestPurgeExpiredJobsRemovesStoredUploads(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	jobStore, err := jobs.New(root)
+	if err != nil {
+		t.Fatalf("jobs.New: %v", err)
+	}
+	now := time.Now().UTC()
+	stalePath := seedStoredJob(t, jobStore, "stale", now.Add(-48*time.Hour))
+	freshPath := seedStoredJob(t, jobStore, "fresh", now.Add(-time.Minute))
+
+	svc := newRetentionService(t, root, jobStore, 24*time.Hour)
+	deleted, err := svc.PurgeExpiredJobs(now)
+	if err != nil {
+		t.Fatalf("PurgeExpiredJobs: %v", err)
+	}
+	if len(deleted) != 1 || deleted[0] != "stale" {
+		t.Fatalf("expected only the stale job to be purged, got %v", deleted)
+	}
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Fatalf("expected the stored upload to be deleted, got %v", err)
+	}
+	if _, err := os.Stat(freshPath); err != nil {
+		t.Fatalf("expected the recent upload to be kept: %v", err)
+	}
+	if _, ok, _ := svc.GetJob("stale"); ok {
+		t.Fatalf("expected the purged job to be gone from the store")
+	}
+}
+
+func TestPurgeExpiredJobsKeepsEverythingWhenRetentionIsDisabled(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	jobStore, err := jobs.New(root)
+	if err != nil {
+		t.Fatalf("jobs.New: %v", err)
+	}
+	stalePath := seedStoredJob(t, jobStore, "stale", time.Now().UTC().Add(-1000*time.Hour))
+
+	svc := newRetentionService(t, root, jobStore, 0)
+	deleted, err := svc.PurgeExpiredJobs(time.Now().UTC())
+	if err != nil {
+		t.Fatalf("PurgeExpiredJobs: %v", err)
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("expected no purge when retention is disabled, got %v", deleted)
+	}
+	if _, err := os.Stat(stalePath); err != nil {
+		t.Fatalf("expected the stored upload to be kept: %v", err)
+	}
+}
+
+func TestRetentionSweeperPurgesUntilTheContextIsCancelled(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	jobStore, err := jobs.New(root)
+	if err != nil {
+		t.Fatalf("jobs.New: %v", err)
+	}
+	stalePath := seedStoredJob(t, jobStore, "stale", time.Now().UTC().Add(-48*time.Hour))
+
+	svc := newRetentionService(t, root, jobStore, 24*time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.runRetentionSweeper(ctx, 5*time.Millisecond)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(stalePath); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("expected the sweeper to delete the expired upload")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("expected the sweeper to stop when the context is cancelled")
+	}
+}
+
+func TestRetentionSweepInterval(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		retention time.Duration
+		want      time.Duration
+	}{
+		{retention: time.Minute, want: time.Minute},
+		{retention: time.Hour, want: 15 * time.Minute},
+		{retention: 24 * time.Hour, want: time.Hour},
+	}
+	for _, testCase := range cases {
+		if got := retentionSweepInterval(testCase.retention); got != testCase.want {
+			t.Fatalf("retentionSweepInterval(%s) = %s, want %s", testCase.retention, got, testCase.want)
+		}
+	}
+}
+
+func newRetentionService(t *testing.T, root string, jobStore *jobs.Store, retention time.Duration) *Service {
+	t.Helper()
+
+	cfg := config.Config{
+		Limits:  config.LimitsConfig{MaxConcurrentJobs: 1},
+		Storage: config.StorageConfig{RootDir: root, JobRetention: retention},
+	}
+	return New(cfg, upstage.NewClient(cfg.Upstage), jobStore)
+}
+
+// seedStoredJob writes a completed job with its uploaded file and returns that path.
+func seedStoredJob(t *testing.T, jobStore *jobs.Store, id string, updatedAt time.Time) string {
+	t.Helper()
+
+	inputPath, err := jobStore.WriteInputFile(id, "sample.png", []byte("original"))
+	if err != nil {
+		t.Fatalf("WriteInputFile: %v", err)
+	}
+	job := &core.JobRecord{
+		ID: id,
+		Metadata: core.ProcessMetadata{
+			RequestID: id,
+			JobID:     id,
+			Status:    "completed",
+			CreatedAt: updatedAt,
+			UpdatedAt: updatedAt,
+		},
+		InputPath: inputPath,
+	}
+	if err := jobStore.Create(job); err != nil {
+		t.Fatalf("jobs.Create: %v", err)
+	}
+	return inputPath
+}
+
 func createWhitePNG(t *testing.T, width, height int) []byte {
 	t.Helper()
 

@@ -18,6 +18,9 @@ const (
 	// Each running job decodes and re-renders a whole document, so only a few of
 	// them are allowed to hold that memory at the same time.
 	defaultMaxConcurrentJobs = 4
+	// Uploaded documents are the very PII the service masks, so they are dropped
+	// from disk a day after the job stopped changing unless told otherwise.
+	defaultJobRetentionHours = 24
 	defaultModel             = "pii"
 	defaultLang              = "ko"
 	defaultSchema            = "oac"
@@ -58,6 +61,9 @@ type LimitsConfig struct {
 
 type StorageConfig struct {
 	RootDir string
+	// JobRetention is how long a finished job keeps its stored files. Zero disables
+	// the cleanup and keeps everything.
+	JobRetention time.Duration
 }
 
 type DebugConfig struct {
@@ -107,7 +113,8 @@ func Load() (Config, error) {
 			SupportedMIMEs:    []string{"application/pdf", "image/png", "image/jpeg"},
 		},
 		Storage: StorageConfig{
-			RootDir: rootDir,
+			RootDir:      rootDir,
+			JobRetention: time.Duration(envNonNegativeInt("PII_MASKER_JOB_RETENTION_HOURS", defaultJobRetentionHours)) * time.Hour,
 		},
 		Debug: DebugConfig{
 			EnableDebug: envBool("PII_MASKER_ENABLE_DEBUG", false),
@@ -211,6 +218,19 @@ func envInt(key string, fallback int) int {
 	}
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+// envNonNegativeInt accepts an explicit 0, which callers use to turn a limit off.
+func envNonNegativeInt(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
 		return fallback
 	}
 	return parsed

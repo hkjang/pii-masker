@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -41,6 +42,8 @@ type Service struct {
 	// document bytes, because each one reads its input back from disk only after
 	// it acquires a slot.
 	jobSlots chan struct{}
+	// jobRetention is how long a finished job keeps its stored files. Zero keeps them.
+	jobRetention time.Duration
 }
 
 type ProcessInput struct {
@@ -67,11 +70,61 @@ func New(cfg config.Config, client *upstage.Client, jobStore *jobs.Store) *Servi
 		slots = defaultMaxConcurrentJobs
 	}
 	return &Service{
-		config:   cfg,
-		client:   client,
-		jobStore: jobStore,
-		jobSlots: make(chan struct{}, slots),
+		config:       cfg,
+		client:       client,
+		jobStore:     jobStore,
+		jobSlots:     make(chan struct{}, slots),
+		jobRetention: cfg.Storage.JobRetention,
 	}
+}
+
+// StartRetentionSweeper deletes stored uploads and masked outputs once they are older
+// than the configured retention window, so the documents the service was asked to mask
+// do not sit on disk forever. It returns immediately, and does nothing at all when
+// retention is disabled.
+func (s *Service) StartRetentionSweeper(ctx context.Context) {
+	if s.jobRetention <= 0 {
+		return
+	}
+	go s.runRetentionSweeper(ctx, retentionSweepInterval(s.jobRetention))
+}
+
+func (s *Service) runRetentionSweeper(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if deleted, err := s.PurgeExpiredJobs(time.Now().UTC()); err != nil {
+			log.Printf("job retention sweep failed: %v", err)
+		} else if len(deleted) > 0 {
+			log.Printf("job retention sweep removed %d expired job(s)", len(deleted))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// PurgeExpiredJobs drops the jobs that are past the retention window right now.
+func (s *Service) PurgeExpiredJobs(now time.Time) ([]string, error) {
+	if s.jobRetention <= 0 {
+		return nil, nil
+	}
+	return s.jobStore.DeleteExpired(now.Add(-s.jobRetention))
+}
+
+// retentionSweepInterval keeps expired files from lingering long past their deadline
+// without waking the sweeper up more often than the window itself warrants.
+func retentionSweepInterval(retention time.Duration) time.Duration {
+	interval := retention / 4
+	if interval < time.Minute {
+		return time.Minute
+	}
+	if interval > time.Hour {
+		return time.Hour
+	}
+	return interval
 }
 
 func (s *Service) ProcessSync(ctx context.Context, input ProcessInput) (*core.ProcessMetadata, []byte, error) {

@@ -73,6 +73,37 @@ func (s *Store) List(limit int) ([]core.JobRecord, error) {
 	return items, nil
 }
 
+// DeleteExpired removes every job whose last update is older than cutoff, along with
+// the uploaded and masked files it kept on disk, and returns the ids that were dropped.
+// Queued and running jobs are always kept regardless of age, because their runner still
+// has to read the stored input back when a slot frees up. A job whose directory cannot
+// be removed stays in the store so the next sweep retries it.
+func (s *Store) DeleteExpired(cutoff time.Time) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	deleted := make([]string, 0)
+	var firstErr error
+	for id, job := range s.jobs {
+		if job.Metadata.Status == "queued" || job.Metadata.Status == "running" {
+			continue
+		}
+		if !job.Metadata.UpdatedAt.Before(cutoff) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(s.root, id)); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to remove job %s: %w", id, err)
+			}
+			continue
+		}
+		delete(s.jobs, id)
+		deleted = append(deleted, id)
+	}
+	sort.Strings(deleted)
+	return deleted, firstErr
+}
+
 func (s *Store) WriteInputFile(jobID, filename string, content []byte) (string, error) {
 	return s.writeFile(jobID, "input_"+filename, content)
 }
