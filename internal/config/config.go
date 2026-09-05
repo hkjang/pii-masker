@@ -18,6 +18,12 @@ const (
 	// Each running job decodes and re-renders a whole document, so only a few of
 	// them are allowed to hold that memory at the same time.
 	defaultMaxConcurrentJobs = 4
+	// A synchronous mask renders the same document the async runner does, so the
+	// number of them in flight is bounded as well.
+	defaultMaxConcurrentSync = 4
+	// Requests waiting for a free slot still hold their upload in memory, so the
+	// queue smooths a short burst instead of parking callers for a long time.
+	defaultSyncQueueWaitSeconds = 10
 	// Uploaded documents are the very PII the service masks, so they are dropped
 	// from disk a day after the job stopped changing unless told otherwise.
 	defaultJobRetentionHours = 24
@@ -56,7 +62,11 @@ type LimitsConfig struct {
 	MaxFileSizeBytes  int64
 	MaxPages          int
 	MaxConcurrentJobs int
-	SupportedMIMEs    []string
+	MaxConcurrentSync int
+	// SyncQueueWait is how long a synchronous request waits for a free processing
+	// slot before it is rejected as busy. Zero rejects it right away.
+	SyncQueueWait  time.Duration
+	SupportedMIMEs []string
 }
 
 type StorageConfig struct {
@@ -110,6 +120,8 @@ func Load() (Config, error) {
 			MaxFileSizeBytes:  int64(envInt("PII_MASKER_MAX_FILE_SIZE_MB", defaultMaxFileSizeMB)) * 1024 * 1024,
 			MaxPages:          envInt("PII_MASKER_MAX_PAGES", defaultMaxPages),
 			MaxConcurrentJobs: envInt("PII_MASKER_MAX_CONCURRENT_JOBS", defaultMaxConcurrentJobs),
+			MaxConcurrentSync: envInt("PII_MASKER_MAX_CONCURRENT_SYNC", defaultMaxConcurrentSync),
+			SyncQueueWait:     time.Duration(envNonNegativeInt("PII_MASKER_SYNC_QUEUE_WAIT_SECONDS", defaultSyncQueueWaitSeconds)) * time.Second,
 			SupportedMIMEs:    []string{"application/pdf", "image/png", "image/jpeg"},
 		},
 		Storage: StorageConfig{

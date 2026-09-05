@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -233,6 +234,109 @@ func TestRetentionSweepInterval(t *testing.T) {
 			t.Fatalf("retentionSweepInterval(%s) = %s, want %s", testCase.retention, got, testCase.want)
 		}
 	}
+}
+
+func TestAcquireSyncSlotShedsWhenEverySlotIsTaken(t *testing.T) {
+	t.Parallel()
+
+	svc := newSyncService(t, 1, 0)
+	release, err := svc.acquireSyncSlot(context.Background())
+	if err != nil {
+		t.Fatalf("acquireSyncSlot: %v", err)
+	}
+
+	var busy *ServerBusyError
+	if _, err := svc.acquireSyncSlot(context.Background()); !errors.As(err, &busy) {
+		t.Fatalf("expected a ServerBusyError, got %v", err)
+	}
+	if busy.Limit != 1 {
+		t.Fatalf("expected the limit to be reported, got %#v", busy)
+	}
+
+	release()
+	if _, err := svc.acquireSyncSlot(context.Background()); err != nil {
+		t.Fatalf("expected the released slot to be reusable, got %v", err)
+	}
+}
+
+func TestAcquireSyncSlotWaitsForAReleasedSlot(t *testing.T) {
+	t.Parallel()
+
+	svc := newSyncService(t, 1, 5*time.Second)
+	release, err := svc.acquireSyncSlot(context.Background())
+	if err != nil {
+		t.Fatalf("acquireSyncSlot: %v", err)
+	}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		release()
+	}()
+
+	if _, err := svc.acquireSyncSlot(context.Background()); err != nil {
+		t.Fatalf("expected the waiting caller to get the freed slot, got %v", err)
+	}
+}
+
+func TestAcquireSyncSlotStopsWhenTheCallerGoesAway(t *testing.T) {
+	t.Parallel()
+
+	svc := newSyncService(t, 1, time.Minute)
+	if _, err := svc.acquireSyncSlot(context.Background()); err != nil {
+		t.Fatalf("acquireSyncSlot: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := svc.acquireSyncSlot(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected the cancelled context to be reported, got %v", err)
+	}
+}
+
+func TestProcessSyncReportsBusyWithoutTouchingTheUpload(t *testing.T) {
+	t.Parallel()
+
+	svc := newSyncService(t, 1, 0)
+	if _, err := svc.acquireSyncSlot(context.Background()); err != nil {
+		t.Fatalf("acquireSyncSlot: %v", err)
+	}
+
+	input := ProcessInput{Attachment: document.NewAttachment("sample.png", "image/png", createWhitePNG(t, 20, 10))}
+	metadata, content, err := svc.ProcessSync(context.Background(), input)
+
+	var busy *ServerBusyError
+	if !errors.As(err, &busy) {
+		t.Fatalf("expected a ServerBusyError, got %v", err)
+	}
+	if content != nil {
+		t.Fatalf("expected no masked content for a shed request")
+	}
+	if metadata == nil || metadata.Error == nil {
+		t.Fatalf("expected metadata describing the rejection, got %#v", metadata)
+	}
+	if metadata.Error.Code != "server_busy" || !metadata.Error.Retryable {
+		t.Fatalf("unexpected error payload %#v", metadata.Error)
+	}
+	if metadata.Status != "failed" {
+		t.Fatalf("unexpected status %q", metadata.Status)
+	}
+	if metadata.Input.FileName != "sample.png" || metadata.Input.Size != input.Attachment.Size {
+		t.Fatalf("expected the upload to be described, got %#v", metadata.Input)
+	}
+}
+
+func newSyncService(t *testing.T, limit int, queueWait time.Duration) *Service {
+	t.Helper()
+
+	root := t.TempDir()
+	jobStore, err := jobs.New(root)
+	if err != nil {
+		t.Fatalf("jobs.New: %v", err)
+	}
+	cfg := config.Config{
+		Limits:  config.LimitsConfig{MaxConcurrentSync: limit, SyncQueueWait: queueWait},
+		Storage: config.StorageConfig{RootDir: root},
+	}
+	return New(cfg, upstage.NewClient(cfg.Upstage), jobStore)
 }
 
 func newRetentionService(t *testing.T, root string, jobStore *jobs.Store, retention time.Duration) *Service {

@@ -33,6 +33,8 @@
 
 비동기 작업(`POST /v1/jobs`)은 동시에 `PII_MASKER_MAX_CONCURRENT_JOBS`개(기본 4개)만 실행합니다. 초과분은 `queued` 상태로 대기하다가 순서대로 실행되며, 대기 중인 작업은 문서 바이트를 메모리에 들고 있지 않고 차례가 오면 저장된 입력 파일을 다시 읽습니다. 업로드를 한꺼번에 몰아넣어 서버 메모리를 고갈시키는 것을 막기 위한 제한입니다.
 
+동기 요청(`POST /v1/mask`)도 같은 이유로 동시에 `PII_MASKER_MAX_CONCURRENT_SYNC`개(기본 4개)만 처리합니다. 슬롯이 모두 차 있으면 `PII_MASKER_SYNC_QUEUE_WAIT_SECONDS`초(기본 10초)까지 기다렸다가, 그래도 자리가 나지 않으면 문서를 건드리지 않고 `503`(`server_busy`, `Retry-After` 헤더 포함)로 돌려보냅니다. 대기 시간을 `0`으로 두면 기다리지 않고 즉시 거절합니다. 이 제한이 없으면 `/v1/mask`를 동시에 호출하는 것만으로 비동기 작업 제한을 우회해 문서 렌더링 메모리를 무제한으로 쓸 수 있습니다.
+
 비동기 작업이 저장한 파일(업로드 원본과 마스킹 결과)은 마지막 상태 변경으로부터 `PII_MASKER_JOB_RETENTION_HOURS`시간(기본 24시간)이 지나면 job 디렉터리째 삭제되고 이력에서도 사라집니다. 마스킹해 달라고 받은 원본이 곧 개인정보이므로 무기한 보관하지 않기 위한 정책입니다. 서버 기동 직후와 그 뒤 주기적으로 정리하며, `0`을 주면 정리를 끄고 모든 파일을 남깁니다. 아직 `queued`/`running` 상태인 작업은 보존 기간과 무관하게 유지됩니다.
 
 업로드 파일명은 경로 구분자, 제어문자(`CR`/`LF` 포함), 따옴표, 역슬래시를 제거하고 120바이트로 잘라서 사용합니다. 클라이언트는 파일명을 RFC 2231(`filename*=utf-8''...`)로 인코딩해 보낼 수 있어서, 디코딩된 이름에 개행이 섞이면 응답 `multipart` 파트 헤더나 추론 서버로 보내는 요청 헤더가 조작될 수 있기 때문입니다. 한글 등 비ASCII 파일명은 그대로 유지됩니다.
@@ -70,6 +72,8 @@
 - `PII_MASKER_MAX_FILE_SIZE_MB`
 - `PII_MASKER_MAX_PAGES`
 - `PII_MASKER_MAX_CONCURRENT_JOBS`
+- `PII_MASKER_MAX_CONCURRENT_SYNC`
+- `PII_MASKER_SYNC_QUEUE_WAIT_SECONDS`
 - `PII_MASKER_DEFAULT_MODEL`
 - `PII_MASKER_DEFAULT_LANG`
 - `PII_MASKER_DEFAULT_SCHEMA`

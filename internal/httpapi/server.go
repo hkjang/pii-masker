@@ -29,6 +29,8 @@ const (
 	// Parts above this size are spilled to a temp file instead of being buffered in
 	// memory, so a large upload cannot pin the whole file in RAM twice.
 	uploadMemoryBytes = 8 * 1024 * 1024
+	// A shed request only waited for a slot, so retrying it shortly is worthwhile.
+	retryAfterSeconds = "5"
 )
 
 type Server struct {
@@ -116,7 +118,13 @@ func (s *Server) handleMask(w http.ResponseWriter, r *http.Request) {
 	metadata, maskedContent, processErr := s.service.ProcessSync(r.Context(), input)
 	if processErr != nil {
 		statusCode := http.StatusBadGateway
-		if metadata != nil && metadata.Error != nil && metadata.Error.Code == "processing_failed" {
+		var busy *service.ServerBusyError
+		switch {
+		case errors.As(processErr, &busy):
+			// Nothing was processed, so the caller can safely send the same upload again.
+			statusCode = http.StatusServiceUnavailable
+			w.Header().Set("Retry-After", retryAfterSeconds)
+		case metadata != nil && metadata.Error != nil && metadata.Error.Code == "processing_failed":
 			statusCode = http.StatusBadRequest
 		}
 		writeJSON(w, statusCode, metadata)
