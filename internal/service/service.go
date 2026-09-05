@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -34,6 +35,10 @@ func init() {
 // a job concurrency limit, so a Service is never built with an unbounded runner.
 const defaultMaxConcurrentJobs = 4
 
+// defaultMaxConcurrentSync plays the same role for synchronous masking: a zero
+// sized slot pool would block every request forever, so it is never built.
+const defaultMaxConcurrentSync = 4
+
 type Service struct {
 	config   config.Config
 	client   *upstage.Client
@@ -42,6 +47,13 @@ type Service struct {
 	// document bytes, because each one reads its input back from disk only after
 	// it acquires a slot.
 	jobSlots chan struct{}
+	// syncSlots bounds how many synchronous masks decode and re-render a document at
+	// once. Rendering a page costs many times the upload size, so without this the
+	// job limit could be bypassed entirely by calling /v1/mask instead.
+	syncSlots chan struct{}
+	// syncQueueWait is how long a synchronous request waits for a free slot before it
+	// is told the server is busy. Zero rejects it right away.
+	syncQueueWait time.Duration
 	// jobRetention is how long a finished job keeps its stored files. Zero keeps them.
 	jobRetention time.Duration
 }
@@ -54,6 +66,17 @@ type ProcessInput struct {
 // InvalidInputError marks an upload that is rejected before any work is queued or persisted.
 type InvalidInputError struct {
 	Err error
+}
+
+// ServerBusyError marks a synchronous request that gave up waiting for a free
+// processing slot. Shedding it is what keeps a burst of uploads from rendering
+// every document at the same time.
+type ServerBusyError struct {
+	Limit int
+}
+
+func (e *ServerBusyError) Error() string {
+	return fmt.Sprintf("server is already masking %d documents", e.Limit)
 }
 
 func (e *InvalidInputError) Error() string {
@@ -69,12 +92,18 @@ func New(cfg config.Config, client *upstage.Client, jobStore *jobs.Store) *Servi
 	if slots <= 0 {
 		slots = defaultMaxConcurrentJobs
 	}
+	syncSlots := cfg.Limits.MaxConcurrentSync
+	if syncSlots <= 0 {
+		syncSlots = defaultMaxConcurrentSync
+	}
 	return &Service{
-		config:       cfg,
-		client:       client,
-		jobStore:     jobStore,
-		jobSlots:     make(chan struct{}, slots),
-		jobRetention: cfg.Storage.JobRetention,
+		config:        cfg,
+		client:        client,
+		jobStore:      jobStore,
+		jobSlots:      make(chan struct{}, slots),
+		syncSlots:     make(chan struct{}, syncSlots),
+		syncQueueWait: cfg.Limits.SyncQueueWait,
+		jobRetention:  cfg.Storage.JobRetention,
 	}
 }
 
@@ -129,7 +158,76 @@ func retentionSweepInterval(retention time.Duration) time.Duration {
 
 func (s *Service) ProcessSync(ctx context.Context, input ProcessInput) (*core.ProcessMetadata, []byte, error) {
 	requestID := uuid.NewString()
+	release, err := s.acquireSyncSlot(ctx)
+	if err != nil {
+		return rejectedSyncMetadata(requestID, input, err), nil, err
+	}
+	defer release()
 	return s.process(ctx, requestID, input)
+}
+
+// acquireSyncSlot reserves one of the synchronous masking slots and returns the
+// function that gives it back. A short queue absorbs a burst; past that the caller
+// is shed with a ServerBusyError instead of piling another rendered document into
+// memory alongside the ones already in flight.
+func (s *Service) acquireSyncSlot(ctx context.Context) (func(), error) {
+	release := func() { <-s.syncSlots }
+	select {
+	case s.syncSlots <- struct{}{}:
+		return release, nil
+	default:
+	}
+	if s.syncQueueWait <= 0 {
+		return nil, &ServerBusyError{Limit: cap(s.syncSlots)}
+	}
+
+	timer := time.NewTimer(s.syncQueueWait)
+	defer timer.Stop()
+	select {
+	case s.syncSlots <- struct{}{}:
+		return release, nil
+	case <-timer.C:
+		return nil, &ServerBusyError{Limit: cap(s.syncSlots)}
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// rejectedSyncMetadata describes a request that never started, so the caller still
+// gets the same metadata shape it would get for a failure during processing.
+func rejectedSyncMetadata(requestID string, input ProcessInput, err error) *core.ProcessMetadata {
+	now := time.Now().UTC()
+	apiErr := &core.APIError{
+		Code:      "request_canceled",
+		Message:   "요청이 취소되었습니다.",
+		Detail:    err.Error(),
+		Retryable: false,
+	}
+	var busy *ServerBusyError
+	if errors.As(err, &busy) {
+		apiErr = &core.APIError{
+			Code:      "server_busy",
+			Message:   "처리 중인 요청이 많아 지금은 마스킹을 시작할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+			Detail:    err.Error(),
+			Retryable: true,
+		}
+	}
+	return &core.ProcessMetadata{
+		RequestID: requestID,
+		Status:    "failed",
+		Input: core.FileDescriptor{
+			FileName: input.Attachment.Name,
+			MIMEType: input.Attachment.MIMEType,
+			Size:     input.Attachment.Size,
+		},
+		MaskPolicy: core.MaskPolicy{
+			Mode:           "selective-redaction",
+			SupportedRules: masking.SupportedRuleNames(),
+		},
+		Error:     apiErr,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
 }
 
 func (s *Service) CreateJob(ctx context.Context, input ProcessInput) (*core.JobRecord, error) {

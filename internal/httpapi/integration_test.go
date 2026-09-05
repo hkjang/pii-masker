@@ -524,27 +524,7 @@ func TestAsyncJobsRunWithBoundedConcurrency(t *testing.T) {
 		jobCount         = 5
 	)
 
-	var (
-		inFlight    int64
-		maxInFlight int64
-		release     = make(chan struct{})
-		releaseOnce sync.Once
-		releaseGate = func() { releaseOnce.Do(func() { close(release) }) }
-		upstream    = mock.UpstageHandler()
-	)
-	gated := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		current := atomic.AddInt64(&inFlight, 1)
-		for {
-			observed := atomic.LoadInt64(&maxInFlight)
-			if current <= observed || atomic.CompareAndSwapInt64(&maxInFlight, observed, current) {
-				break
-			}
-		}
-		<-release
-		atomic.AddInt64(&inFlight, -1)
-		upstream.ServeHTTP(w, r)
-	})
-
+	gated, inFlight, maxInFlight, releaseGate := newGatedUpstream()
 	serverURL, _ := startAppServerWithUpstream(t, gated, func(cfg *config.Config) {
 		cfg.Limits.MaxConcurrentJobs = concurrencyLimit
 		cfg.Upstage.Timeout = 60 * time.Second
@@ -574,11 +554,11 @@ func TestAsyncJobsRunWithBoundedConcurrency(t *testing.T) {
 	}
 
 	waitForCondition(t, "upstream to reach the concurrency limit", func() bool {
-		return atomic.LoadInt64(&inFlight) >= concurrencyLimit
+		return atomic.LoadInt64(inFlight) >= concurrencyLimit
 	})
 	// Give any runner that ignored the limit a chance to reach the upstream too.
 	time.Sleep(300 * time.Millisecond)
-	if observed := atomic.LoadInt64(&maxInFlight); observed != concurrencyLimit {
+	if observed := atomic.LoadInt64(maxInFlight); observed != concurrencyLimit {
 		t.Fatalf("expected at most %d concurrent jobs, got %d", concurrencyLimit, observed)
 	}
 
@@ -588,9 +568,164 @@ func TestAsyncJobsRunWithBoundedConcurrency(t *testing.T) {
 			return jobStatus(t, serverURL, jobID) == "completed"
 		})
 	}
-	if observed := atomic.LoadInt64(&maxInFlight); observed != concurrencyLimit {
+	if observed := atomic.LoadInt64(maxInFlight); observed != concurrencyLimit {
 		t.Fatalf("expected at most %d concurrent jobs, got %d", concurrencyLimit, observed)
 	}
+}
+
+// TestSyncMaskRunsWithBoundedConcurrency is the /v1/mask counterpart of the async
+// limit: a synchronous mask decodes and re-renders the whole document too, so the
+// server must not start one per request.
+func TestSyncMaskRunsWithBoundedConcurrency(t *testing.T) {
+	t.Parallel()
+
+	const (
+		concurrencyLimit = 2
+		requestCount     = 5
+	)
+
+	gated, inFlight, maxInFlight, releaseGate := newGatedUpstream()
+	serverURL, _ := startAppServerWithUpstream(t, gated, func(cfg *config.Config) {
+		cfg.Limits.MaxConcurrentSync = concurrencyLimit
+		cfg.Limits.SyncQueueWait = 60 * time.Second
+		cfg.Upstage.Timeout = 60 * time.Second
+	})
+	// Registered after the servers so it runs before their cleanup: a failing
+	// assertion must not leave requests parked in the handler.
+	t.Cleanup(releaseGate)
+
+	// Bodies are built up front so the request goroutines never touch the test helper.
+	// Every body carries its own multipart boundary, so the content types are kept
+	// alongside them instead of being shared.
+	bodies := make([]*bytes.Buffer, requestCount)
+	contentTypes := make([]string, requestCount)
+	for index := range bodies {
+		bodies[index], contentTypes[index] = buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 400, 200), nil)
+	}
+
+	statuses := make([]int, requestCount)
+	var wg sync.WaitGroup
+	for index := range requestCount {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			response, err := http.Post(serverURL+"/v1/mask", contentTypes[index], bodies[index])
+			if err != nil {
+				return
+			}
+			defer response.Body.Close()
+			_, _ = io.Copy(io.Discard, response.Body)
+			statuses[index] = response.StatusCode
+		}()
+	}
+
+	waitForCondition(t, "upstream to reach the concurrency limit", func() bool {
+		return atomic.LoadInt64(inFlight) >= concurrencyLimit
+	})
+	// Give any request that ignored the limit a chance to reach the upstream too.
+	time.Sleep(300 * time.Millisecond)
+	if observed := atomic.LoadInt64(maxInFlight); observed != concurrencyLimit {
+		t.Fatalf("expected at most %d concurrent masks, got %d", concurrencyLimit, observed)
+	}
+
+	releaseGate()
+	wg.Wait()
+	if observed := atomic.LoadInt64(maxInFlight); observed != concurrencyLimit {
+		t.Fatalf("expected at most %d concurrent masks, got %d", concurrencyLimit, observed)
+	}
+	for index, status := range statuses {
+		if status != http.StatusOK {
+			t.Fatalf("queued mask %d returned %d, want 200", index, status)
+		}
+	}
+}
+
+// TestSyncMaskShedsRequestWhenSlotsAreBusy pins the only slot and checks that the
+// next upload is turned away instead of being processed alongside it.
+func TestSyncMaskShedsRequestWhenSlotsAreBusy(t *testing.T) {
+	t.Parallel()
+
+	gated, inFlight, _, releaseGate := newGatedUpstream()
+	serverURL, _ := startAppServerWithUpstream(t, gated, func(cfg *config.Config) {
+		cfg.Limits.MaxConcurrentSync = 1
+		cfg.Limits.SyncQueueWait = 0
+		cfg.Upstage.Timeout = 60 * time.Second
+	})
+	t.Cleanup(releaseGate)
+
+	heldBody, heldContentType := buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 400, 200), nil)
+	held := make(chan int, 1)
+	go func() {
+		response, err := http.Post(serverURL+"/v1/mask", heldContentType, heldBody)
+		if err != nil {
+			held <- 0
+			return
+		}
+		defer response.Body.Close()
+		_, _ = io.Copy(io.Discard, response.Body)
+		held <- response.StatusCode
+	}()
+
+	waitForCondition(t, "the first mask to occupy the only slot", func() bool {
+		return atomic.LoadInt64(inFlight) >= 1
+	})
+
+	requestBody, contentType := buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 400, 200), nil)
+	response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected the second mask to be shed, got %d", response.StatusCode)
+	}
+	if retryAfter := response.Header.Get("Retry-After"); retryAfter == "" {
+		t.Fatalf("expected a Retry-After header on a shed request")
+	}
+	var metadata core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+		t.Fatalf("decode shed metadata: %v", err)
+	}
+	if metadata.Error == nil || metadata.Error.Code != "server_busy" {
+		t.Fatalf("unexpected error payload %#v", metadata.Error)
+	}
+	if !metadata.Error.Retryable {
+		t.Fatalf("expected a shed request to be retryable")
+	}
+	if observed := atomic.LoadInt64(inFlight); observed != 1 {
+		t.Fatalf("expected the shed request to never reach the upstream, got %d in flight", observed)
+	}
+
+	releaseGate()
+	if status := <-held; status != http.StatusOK {
+		t.Fatalf("held mask returned %d, want 200", status)
+	}
+}
+
+// newGatedUpstream parks every upstream call until the returned release function is
+// called, so a test can count how many requests are being processed at the same time.
+func newGatedUpstream() (http.Handler, *int64, *int64, func()) {
+	var (
+		inFlight    int64
+		maxInFlight int64
+		release     = make(chan struct{})
+		releaseOnce sync.Once
+		upstream    = mock.UpstageHandler()
+	)
+	gated := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := atomic.AddInt64(&inFlight, 1)
+		for {
+			observed := atomic.LoadInt64(&maxInFlight)
+			if current <= observed || atomic.CompareAndSwapInt64(&maxInFlight, observed, current) {
+				break
+			}
+		}
+		<-release
+		atomic.AddInt64(&inFlight, -1)
+		upstream.ServeHTTP(w, r)
+	})
+	return gated, &inFlight, &maxInFlight, func() { releaseOnce.Do(func() { close(release) }) }
 }
 
 func TestExpiredJobFilesArePurgedOnStartup(t *testing.T) {
@@ -830,6 +965,7 @@ func startAppServerWithUpstream(t *testing.T, upstream http.Handler, customize f
 		Limits: config.LimitsConfig{
 			MaxFileSizeBytes: 5 * 1024 * 1024,
 			MaxPages:         10,
+			SyncQueueWait:    10 * time.Second,
 			SupportedMIMEs:   []string{"application/pdf", "image/png", "image/jpeg"},
 		},
 		Storage: config.StorageConfig{
