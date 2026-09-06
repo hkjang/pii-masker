@@ -32,6 +32,21 @@ const (
 	defaultSchema            = "oac"
 )
 
+const (
+	// DefaultReadHeaderTimeout bounds how long a client may take to send its
+	// request headers, so a connection that dribbles them out cannot hold a
+	// server goroutine forever. The request body is deliberately left untimed
+	// because a 50MB upload on a slow link is legitimate.
+	DefaultReadHeaderTimeout = 15 * time.Second
+	// DefaultIdleTimeout closes keep-alive connections that stopped sending
+	// requests instead of keeping them open indefinitely.
+	DefaultIdleTimeout = 60 * time.Second
+	// DefaultShutdownTimeout is how long in-flight requests get to finish once a
+	// shutdown signal arrives; a synchronous mask waits for the upstream call, so
+	// it needs more than the upstream timeout to drain cleanly.
+	DefaultShutdownTimeout = 45 * time.Second
+)
+
 type Config struct {
 	Server  ServerConfig
 	Upstage UpstageConfig
@@ -44,6 +59,11 @@ type Config struct {
 type ServerConfig struct {
 	Address       string
 	PublicBaseURL string
+	// ReadHeaderTimeout and IdleTimeout bound how long a connection may stay open
+	// without making progress. ShutdownTimeout bounds the graceful drain.
+	ReadHeaderTimeout time.Duration
+	IdleTimeout       time.Duration
+	ShutdownTimeout   time.Duration
 }
 
 type UpstageConfig struct {
@@ -102,8 +122,11 @@ func Load() (Config, error) {
 
 	cfg := Config{
 		Server: ServerConfig{
-			Address:       envOrDefault("PII_MASKER_ADDR", defaultAddress),
-			PublicBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("PII_MASKER_PUBLIC_BASE_URL")), "/"),
+			Address:           envOrDefault("PII_MASKER_ADDR", defaultAddress),
+			PublicBaseURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("PII_MASKER_PUBLIC_BASE_URL")), "/"),
+			ReadHeaderTimeout: envSeconds("PII_MASKER_READ_HEADER_TIMEOUT_SECONDS", DefaultReadHeaderTimeout),
+			IdleTimeout:       envSeconds("PII_MASKER_IDLE_TIMEOUT_SECONDS", DefaultIdleTimeout),
+			ShutdownTimeout:   envSeconds("PII_MASKER_SHUTDOWN_TIMEOUT_SECONDS", DefaultShutdownTimeout),
 		},
 		Upstage: UpstageConfig{
 			BaseURL:    normalizedBaseURL,
@@ -233,6 +256,13 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+// envSeconds reads a duration given in whole seconds. These guards protect the
+// server from connections that never finish, so a non-positive value falls back
+// to the default instead of disabling them.
+func envSeconds(key string, fallback time.Duration) time.Duration {
+	return time.Duration(envInt(key, int(fallback/time.Second))) * time.Second
 }
 
 // envNonNegativeInt accepts an explicit 0, which callers use to turn a limit off.
