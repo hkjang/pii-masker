@@ -37,6 +37,8 @@
 
 비동기 작업이 저장한 파일(업로드 원본과 마스킹 결과)은 마지막 상태 변경으로부터 `PII_MASKER_JOB_RETENTION_HOURS`시간(기본 24시간)이 지나면 job 디렉터리째 삭제되고 이력에서도 사라집니다. 마스킹해 달라고 받은 원본이 곧 개인정보이므로 무기한 보관하지 않기 위한 정책입니다. 서버 기동 직후와 그 뒤 주기적으로 정리하며, `0`을 주면 정리를 끄고 모든 파일을 남깁니다. 아직 `queued`/`running` 상태인 작업은 보존 기간과 무관하게 유지됩니다.
 
+서버는 `SIGINT`/`SIGTERM`을 받으면 새 연결 수신을 멈추고 처리 중인 요청이 끝날 때까지 `PII_MASKER_SHUTDOWN_TIMEOUT_SECONDS`초(기본 45초)까지 기다린 뒤 종료합니다. 배포·재시작 중에 마스킹이 끝난 응답이 잘려 나가지 않게 하고, 보존 기간 정리 작업도 함께 멈추기 위해서입니다. 요청 헤더를 다 보내지 않는 연결은 `PII_MASKER_READ_HEADER_TIMEOUT_SECONDS`초(기본 15초)에, 요청 없이 열려만 있는 연결은 `PII_MASKER_IDLE_TIMEOUT_SECONDS`초(기본 60초)에 끊습니다. 큰 업로드나 느린 추론 응답을 중간에 끊지 않도록 본문 읽기·응답 쓰기에는 제한을 두지 않습니다.
+
 업로드 파일명은 경로 구분자, 제어문자(`CR`/`LF` 포함), 따옴표, 역슬래시를 제거하고 120바이트로 잘라서 사용합니다. 클라이언트는 파일명을 RFC 2231(`filename*=utf-8''...`)로 인코딩해 보낼 수 있어서, 디코딩된 이름에 개행이 섞이면 응답 `multipart` 파트 헤더나 추론 서버로 보내는 요청 헤더가 조작될 수 있기 때문입니다. 한글 등 비ASCII 파일명은 그대로 유지됩니다.
 
 ## 마스킹 규칙
@@ -63,6 +65,9 @@
 - `PII_MASKER_ADDR`
 - `PII_MASKER_PUBLIC_BASE_URL`
 - `PII_MASKER_STORAGE_DIR`
+- `PII_MASKER_READ_HEADER_TIMEOUT_SECONDS`
+- `PII_MASKER_IDLE_TIMEOUT_SECONDS`
+- `PII_MASKER_SHUTDOWN_TIMEOUT_SECONDS`
 - `PII_MASKER_JOB_RETENTION_HOURS`
 - `PII_MASKER_UPSTAGE_BASE_URL`
 - `PII_MASKER_UPSTAGE_AUTH_MODE`
