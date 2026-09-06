@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -203,7 +204,26 @@ func (s *Server) handleGetJobResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content, err := os.ReadFile(job.OutputPath)
+	// The result is streamed straight off disk instead of being buffered, so a burst
+	// of downloads cannot pin one masked file per request in memory.
+	file, err := os.Open(job.OutputPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			writeError(w, http.StatusNotFound, &core.APIError{
+				Code:    "job_result_not_found",
+				Message: "결과 파일을 찾을 수 없습니다.",
+			})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, &core.APIError{
+			Code:    "result_read_failed",
+			Message: err.Error(),
+		})
+		return
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, &core.APIError{
 			Code:    "result_read_failed",
@@ -212,10 +232,11 @@ func (s *Server) handleGetJobResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", job.Metadata.Output.MIMEType)
+	if mimeType := job.Metadata.Output.MIMEType; mimeType != "" {
+		w.Header().Set("Content-Type", mimeType)
+	}
 	w.Header().Set("Content-Disposition", attachmentDisposition(job.Metadata.Output.FileName))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(content)
+	http.ServeContent(w, r, job.Metadata.Output.FileName, info.ModTime(), file)
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {

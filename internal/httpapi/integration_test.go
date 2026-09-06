@@ -512,6 +512,128 @@ func TestJobResultSanitizesInjectedUploadFilename(t *testing.T) {
 	}
 }
 
+// TestJobResultServesRangeRequests checks that the result is streamed off disk with
+// range support instead of being buffered whole, so resuming a large download works.
+func TestJobResultServesRangeRequests(t *testing.T) {
+	t.Parallel()
+
+	serverURL, _ := startAppServerWithConfig(t, nil)
+	jobID := createCompletedPDFJob(t, serverURL)
+	resultURL := serverURL + "/v1/jobs/" + url.PathEscape(jobID) + "/result"
+
+	fullResponse, err := http.Get(resultURL)
+	if err != nil {
+		t.Fatalf("get job result: %v", err)
+	}
+	defer fullResponse.Body.Close()
+	if fullResponse.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected result status %d", fullResponse.StatusCode)
+	}
+	if fullResponse.Header.Get("Accept-Ranges") != "bytes" {
+		t.Fatalf("expected byte range support, got %q", fullResponse.Header.Get("Accept-Ranges"))
+	}
+	fullBytes, _ := io.ReadAll(fullResponse.Body)
+	if len(fullBytes) < 32 {
+		t.Fatalf("expected a non-trivial pdf result, got %d bytes", len(fullBytes))
+	}
+
+	request, err := http.NewRequest(http.MethodGet, resultURL, nil)
+	if err != nil {
+		t.Fatalf("build range request: %v", err)
+	}
+	request.Header.Set("Range", "bytes=8-23")
+	rangeResponse, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("get job result range: %v", err)
+	}
+	defer rangeResponse.Body.Close()
+
+	if rangeResponse.StatusCode != http.StatusPartialContent {
+		body, _ := io.ReadAll(rangeResponse.Body)
+		t.Fatalf("unexpected range status %d: %s", rangeResponse.StatusCode, string(body))
+	}
+	expectedRange := "bytes 8-23/" + strconv.Itoa(len(fullBytes))
+	if got := rangeResponse.Header.Get("Content-Range"); got != expectedRange {
+		t.Fatalf("unexpected content-range %q, want %q", got, expectedRange)
+	}
+	rangeBytes, _ := io.ReadAll(rangeResponse.Body)
+	if !bytes.Equal(rangeBytes, fullBytes[8:24]) {
+		t.Fatalf("range body does not match the corresponding slice of the full result")
+	}
+	if !strings.Contains(rangeResponse.Header.Get("Content-Type"), "application/pdf") {
+		t.Fatalf("unexpected range content type: %s", rangeResponse.Header.Get("Content-Type"))
+	}
+}
+
+// TestJobResultReturnsNotFoundWhenFileIsGone covers a result file that disappeared from
+// disk after the job completed: that is a missing result, not an internal failure.
+func TestJobResultReturnsNotFoundWhenFileIsGone(t *testing.T) {
+	t.Parallel()
+
+	serverURL, cfg := startAppServerWithConfig(t, nil)
+	jobID := createCompletedPDFJob(t, serverURL)
+
+	jobDir := filepath.Join(cfg.Storage.RootDir, "jobs", jobID)
+	entries, err := os.ReadDir(jobDir)
+	if err != nil {
+		t.Fatalf("read job dir: %v", err)
+	}
+	removed := 0
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "output_") {
+			if err := os.Remove(filepath.Join(jobDir, entry.Name())); err != nil {
+				t.Fatalf("remove result file: %v", err)
+			}
+			removed++
+		}
+	}
+	if removed == 0 {
+		t.Fatalf("expected a stored result file in %s", jobDir)
+	}
+
+	response, err := http.Get(serverURL + "/v1/jobs/" + url.PathEscape(jobID) + "/result")
+	if err != nil {
+		t.Fatalf("get job result: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	var payload struct {
+		Error core.APIError `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode error payload: %v", err)
+	}
+	if payload.Error.Code != "job_result_not_found" {
+		t.Fatalf("unexpected error code %q", payload.Error.Code)
+	}
+}
+
+func createCompletedPDFJob(t *testing.T, serverURL string) string {
+	t.Helper()
+
+	requestBody, contentType := buildMultipartBody(t, "sample.pdf", "application/pdf", createBlankPDF(400, 400), nil)
+	response, err := http.Post(serverURL+"/v1/jobs", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/jobs: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	var metadata core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+		t.Fatalf("decode job metadata: %v", err)
+	}
+	waitForJobStatus(t, serverURL, metadata.JobID, "completed")
+	return metadata.JobID
+}
+
 // TestAsyncJobsRunWithBoundedConcurrency holds every upstream call open, so the
 // number of simultaneous upstream requests is exactly the number of accepted jobs
 // the runner lets execute at once. Without a limit all of them would run together
