@@ -341,7 +341,27 @@ func textPartHeader(filename, contentType string) textproto.MIMEHeader {
 // Names are already sanitized when the upload is accepted, but multipart part
 // headers are written verbatim, so the characters that could end the quoted
 // string or the header line are dropped here as well.
+//
+// A header field value is not UTF-8, so a Korean name placed raw in the quoted
+// string is decoded as latin-1 by most clients and saved as mojibake. Non ASCII
+// names therefore also get the RFC 6266 filename* parameter, while the quoted
+// filename stays behind as an ASCII fallback for clients that ignore it.
 func attachmentDisposition(filename string) string {
+	name := stripDispositionUnsafeRunes(filename)
+	if name == "" {
+		name = "document"
+	}
+	fallback := asciiFilenameFallback(name)
+	disposition := fmt.Sprintf(`attachment; filename="%s"`, fallback)
+	if fallback == name {
+		return disposition
+	}
+	return disposition + "; filename*=UTF-8''" + percentEncodeFilename(name)
+}
+
+// stripDispositionUnsafeRunes drops the characters that could close the quoted
+// string or end the header line.
+func stripDispositionUnsafeRunes(filename string) string {
 	var builder strings.Builder
 	builder.Grow(len(filename))
 	for _, r := range filename {
@@ -350,10 +370,59 @@ func attachmentDisposition(filename string) string {
 		}
 		builder.WriteRune(r)
 	}
-	if builder.Len() == 0 {
-		return `attachment; filename="document"`
+	return builder.String()
+}
+
+// asciiFilenameFallback replaces every non ASCII rune so the quoted parameter
+// stays readable for clients that only understand it. A name with nothing ASCII
+// left to show falls back to a generic one instead of a row of underscores.
+func asciiFilenameFallback(name string) string {
+	var builder strings.Builder
+	builder.Grow(len(name))
+	for _, r := range name {
+		if r > unicode.MaxASCII {
+			builder.WriteByte('_')
+			continue
+		}
+		builder.WriteRune(r)
 	}
-	return fmt.Sprintf(`attachment; filename="%s"`, builder.String())
+	fallback := builder.String()
+	if strings.Trim(fallback, "_") == "" {
+		return "document"
+	}
+	return fallback
+}
+
+// percentEncodeFilename encodes a name as the RFC 5987 value-chars used by the
+// filename* parameter. url.PathEscape is not usable here because it leaves
+// characters such as "$" and "=" alone, which would break the parameter.
+func percentEncodeFilename(name string) string {
+	const upperhex = "0123456789ABCDEF"
+	var builder strings.Builder
+	builder.Grow(len(name))
+	for i := 0; i < len(name); i++ {
+		if b := name[i]; isAttrChar(b) {
+			builder.WriteByte(b)
+			continue
+		}
+		builder.WriteByte('%')
+		builder.WriteByte(upperhex[name[i]>>4])
+		builder.WriteByte(upperhex[name[i]&0x0f])
+	}
+	return builder.String()
+}
+
+// isAttrChar reports whether a byte may appear unescaped in an RFC 5987 value.
+func isAttrChar(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	}
+	switch b {
+	case '!', '#', '$', '&', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
