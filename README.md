@@ -19,7 +19,7 @@
 - `GET /v1/jobs/{job_id}/result`
   - 결과 파일 다운로드
 - `GET /v1/history`
-  - 최근 작업 이력 조회
+  - 최근 작업 이력 조회 (`?limit=` 기본 20, 최대 100)
 - `POST /v1/test-connection`
   - Upstage 호환 추론 엔드포인트 연결 점검
 - `GET /v1/health`

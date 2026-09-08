@@ -889,6 +889,70 @@ func TestExpiredJobFilesArePurgedOnStartup(t *testing.T) {
 	}
 }
 
+// TestHistoryCapsTheNumberOfReturnedJobs pins the page size of the history listing:
+// without a cap a single request could ask the server to clone and serialize every
+// job the store still holds.
+func TestHistoryCapsTheNumberOfReturnedJobs(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	const seededJobs = 150
+	serverURL, _ := startAppServerWithConfig(t, func(cfg *config.Config) {
+		jobsDir := filepath.Join(cfg.Storage.RootDir, "jobs")
+		for index := range seededJobs {
+			// The newest job is job-0, so the listing order is easy to assert on.
+			seedStoredJobFiles(t, jobsDir, "job-"+strconv.Itoa(index), now.Add(-time.Duration(index)*time.Minute))
+		}
+	})
+
+	cases := []struct {
+		name     string
+		query    string
+		expected int
+	}{
+		{name: "default page", query: "", expected: 20},
+		{name: "explicit page", query: "?limit=5", expected: 5},
+		{name: "oversized page", query: "?limit=100000", expected: 100},
+		{name: "negative page", query: "?limit=-1", expected: 20},
+		{name: "unparsable page", query: "?limit=all", expected: 20},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			items := fetchHistory(t, serverURL+"/v1/history"+testCase.query)
+			if len(items) != testCase.expected {
+				t.Fatalf("history returned %d items, want %d", len(items), testCase.expected)
+			}
+			if items[0].JobID != "job-0" {
+				t.Fatalf("expected the newest job first, got %q", items[0].JobID)
+			}
+		})
+	}
+}
+
+func fetchHistory(t *testing.T, historyURL string) []core.ProcessMetadata {
+	t.Helper()
+
+	response, err := http.Get(historyURL)
+	if err != nil {
+		t.Fatalf("get %s: %v", historyURL, err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+
+	var payload struct {
+		Items []core.ProcessMetadata `json:"items"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode history: %v", err)
+	}
+	return payload.Items
+}
+
 // seedStoredJobFiles writes a finished job straight to disk, the way a previous run of
 // the server would have left it behind.
 func seedStoredJobFiles(t *testing.T, jobsDir, jobID string, updatedAt time.Time) {

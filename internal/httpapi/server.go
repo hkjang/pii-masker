@@ -32,6 +32,11 @@ const (
 	uploadMemoryBytes = 8 * 1024 * 1024
 	// A shed request only waited for a slot, so retrying it shortly is worthwhile.
 	retryAfterSeconds = "5"
+	// The history listing is a convenience view of the most recent work, so a
+	// caller that asks for nothing gets a page and one that asks for an absurd
+	// number gets capped instead of having the whole store serialized for it.
+	defaultHistoryLimit = 20
+	maxHistoryLimit     = 100
 )
 
 type Server struct {
@@ -240,13 +245,7 @@ func (s *Server) handleGetJobResult(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
-	limit := 20
-	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-	items, err := s.service.ListJobs(limit)
+	items, err := s.service.ListJobs(historyLimit(r.URL.Query().Get("limit")))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, &core.APIError{
 			Code:    "history_lookup_failed",
@@ -263,6 +262,21 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		response = append(response, item.Metadata)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": response})
+}
+
+// historyLimit turns the caller supplied page size into a bounded one. A missing,
+// unparsable or non-positive value falls back to the default page, and anything
+// larger than the maximum is capped so a single request cannot make the server
+// clone and serialize every job it still holds.
+func historyLimit(raw string) int {
+	parsed, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || parsed <= 0 {
+		return defaultHistoryLimit
+	}
+	if parsed > maxHistoryLimit {
+		return maxHistoryLimit
+	}
+	return parsed
 }
 
 func (s *Server) readProcessInput(w http.ResponseWriter, r *http.Request) (service.ProcessInput, error) {
