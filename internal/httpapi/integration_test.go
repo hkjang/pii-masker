@@ -612,6 +612,92 @@ func TestJobResultReturnsNotFoundWhenFileIsGone(t *testing.T) {
 	}
 }
 
+// TestDownloadsEncodeNonASCIIFilenames uploads a Korean file name and checks both
+// places a name reaches a client: the multipart part of a synchronous mask and the
+// job result download. A quoted-string carries latin-1, so without the RFC 6266
+// filename* parameter the name is saved as mojibake.
+func TestDownloadsEncodeNonASCIIFilenames(t *testing.T) {
+	t.Parallel()
+
+	const uploadName = "계약서.pdf"
+	const expectedName = "masked_계약서.pdf"
+
+	serverURL, _ := startAppServerWithConfig(t, nil)
+
+	requestBody, contentType := buildMultipartBody(t, uploadName, "application/pdf", createBlankPDF(400, 400), nil)
+	maskResponse, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer maskResponse.Body.Close()
+	if maskResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(maskResponse.Body)
+		t.Fatalf("unexpected mask status %d: %s", maskResponse.StatusCode, string(body))
+	}
+
+	mediaType, params, err := mime.ParseMediaType(maskResponse.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/mixed" {
+		t.Fatalf("unexpected mask content-type %q: %v", maskResponse.Header.Get("Content-Type"), err)
+	}
+	reader := multipart.NewReader(maskResponse.Body, params["boundary"])
+	if _, err := reader.NextPart(); err != nil {
+		t.Fatalf("read metadata part: %v", err)
+	}
+	filePart, err := reader.NextPart()
+	if err != nil {
+		t.Fatalf("read file part: %v", err)
+	}
+	assertEncodedDisposition(t, filePart.Header.Get("Content-Disposition"), expectedName)
+
+	jobRequestBody, jobContentType := buildMultipartBody(t, uploadName, "application/pdf", createBlankPDF(400, 400), nil)
+	jobResponse, err := http.Post(serverURL+"/v1/jobs", jobContentType, jobRequestBody)
+	if err != nil {
+		t.Fatalf("post /v1/jobs: %v", err)
+	}
+	defer jobResponse.Body.Close()
+	if jobResponse.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(jobResponse.Body)
+		t.Fatalf("unexpected job status %d: %s", jobResponse.StatusCode, string(body))
+	}
+	var metadata core.ProcessMetadata
+	if err := json.NewDecoder(jobResponse.Body).Decode(&metadata); err != nil {
+		t.Fatalf("decode job metadata: %v", err)
+	}
+	waitForJobStatus(t, serverURL, metadata.JobID, "completed")
+
+	resultResponse, err := http.Get(serverURL + "/v1/jobs/" + url.PathEscape(metadata.JobID) + "/result")
+	if err != nil {
+		t.Fatalf("get job result: %v", err)
+	}
+	defer resultResponse.Body.Close()
+	assertEncodedDisposition(t, resultResponse.Header.Get("Content-Disposition"), expectedName)
+}
+
+// assertEncodedDisposition checks that a Content-Disposition offers the name both
+// as an ASCII fallback and as an RFC 6266 filename* a modern client can decode.
+func assertEncodedDisposition(t *testing.T, disposition, expectedName string) {
+	t.Helper()
+
+	if !strings.Contains(disposition, "filename*=UTF-8''") {
+		t.Fatalf("expected an encoded filename* parameter in %q", disposition)
+	}
+	for i := 0; i < len(disposition); i++ {
+		if disposition[i] > unicode.MaxASCII {
+			t.Fatalf("expected an ascii only header value, got %q", disposition)
+		}
+	}
+	mediaType, params, err := mime.ParseMediaType(disposition)
+	if err != nil {
+		t.Fatalf("parse content-disposition %q: %v", disposition, err)
+	}
+	if mediaType != "attachment" {
+		t.Fatalf("unexpected disposition type %q", mediaType)
+	}
+	if params["filename"] != expectedName {
+		t.Fatalf("filename = %q, want %q", params["filename"], expectedName)
+	}
+}
+
 func createCompletedPDFJob(t *testing.T, serverURL string) string {
 	t.Helper()
 
