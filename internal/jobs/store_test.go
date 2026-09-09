@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -104,6 +105,80 @@ func TestDeleteExpiredIsAppliedToReloadedJobs(t *testing.T) {
 	}
 	if _, err := os.Stat(job.InputPath); !os.IsNotExist(err) {
 		t.Fatalf("expected the reloaded input file to be removed, got %v", err)
+	}
+}
+
+// A job that was interrupted keeps the timestamp it had, so the upload it stored
+// is still swept once the retention window measured from that moment has passed.
+func TestLoadKeepsTheTimestampOfInterruptedJobs(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	now := time.Now().UTC()
+	interruptedAt := now.Add(-48 * time.Hour)
+	seedJob(t, store, "running-job", "running", interruptedAt)
+
+	reloaded, err := New(root)
+	if err != nil {
+		t.Fatalf("New (reload): %v", err)
+	}
+	job, ok, err := reloaded.Get("running-job")
+	if err != nil || !ok {
+		t.Fatalf("expected the job to be reloaded, ok=%v err=%v", ok, err)
+	}
+	if job.Metadata.Status != "failed" || job.Metadata.Error == nil || job.Metadata.Error.Code != "job_interrupted" {
+		t.Fatalf("expected an interrupted job, got %#v", job.Metadata)
+	}
+	if !job.Metadata.UpdatedAt.Equal(interruptedAt) {
+		t.Fatalf("expected the stored timestamp %s, got %s", interruptedAt, job.Metadata.UpdatedAt)
+	}
+
+	deleted, err := reloaded.DeleteExpired(now.Add(-24 * time.Hour))
+	if err != nil {
+		t.Fatalf("DeleteExpired: %v", err)
+	}
+	if len(deleted) != 1 || deleted[0] != "running-job" {
+		t.Fatalf("expected the interrupted job to be deleted, got %v", deleted)
+	}
+	if _, err := os.Stat(job.InputPath); !os.IsNotExist(err) {
+		t.Fatalf("expected the stored upload to be removed, got %v", err)
+	}
+}
+
+// The interrupted state is written back, so restarting again does not have to redo
+// the transition and cannot keep moving the retention deadline forward.
+func TestLoadPersistsInterruptedJobs(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	queuedAt := time.Now().UTC().Add(-time.Hour)
+	seedJob(t, store, "queued-job", "queued", queuedAt)
+
+	if _, err := New(root); err != nil {
+		t.Fatalf("New (reload): %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(root, "jobs", "queued-job", "job.json"))
+	if err != nil {
+		t.Fatalf("read job.json: %v", err)
+	}
+	var stored core.JobRecord
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatalf("decode job.json: %v", err)
+	}
+	if stored.Metadata.Status != "failed" || stored.Metadata.Error == nil || stored.Metadata.Error.Code != "job_interrupted" {
+		t.Fatalf("expected the interrupted state on disk, got %#v", stored.Metadata)
+	}
+	if !stored.Metadata.UpdatedAt.Equal(queuedAt) {
+		t.Fatalf("expected the stored timestamp %s, got %s", queuedAt, stored.Metadata.UpdatedAt)
 	}
 }
 
