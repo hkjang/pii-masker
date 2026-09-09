@@ -79,11 +79,27 @@ func (s *Server) routes() {
 	s.router.HandleFunc("/v1/health", s.handleHealth).Methods(http.MethodGet)
 	s.router.HandleFunc("/v1/config/public", s.handlePublicConfig).Methods(http.MethodGet)
 	s.router.HandleFunc("/v1/test-connection", s.handleTestConnection).Methods(http.MethodPost)
-	s.router.HandleFunc("/v1/mask", s.handleMask).Methods(http.MethodPost)
-	s.router.HandleFunc("/v1/jobs", s.handleCreateJob).Methods(http.MethodPost)
-	s.router.HandleFunc("/v1/jobs/{job_id}", s.handleGetJob).Methods(http.MethodGet)
-	s.router.HandleFunc("/v1/jobs/{job_id}/result", s.handleGetJobResult).Methods(http.MethodGet)
-	s.router.HandleFunc("/v1/history", s.handleHistory).Methods(http.MethodGet)
+	s.router.HandleFunc("/v1/mask", documentResponse(s.handleMask)).Methods(http.MethodPost)
+	s.router.HandleFunc("/v1/jobs", documentResponse(s.handleCreateJob)).Methods(http.MethodPost)
+	s.router.HandleFunc("/v1/jobs/{job_id}", documentResponse(s.handleGetJob)).Methods(http.MethodGet)
+	s.router.HandleFunc("/v1/jobs/{job_id}/result", documentResponse(s.handleGetJobResult)).Methods(http.MethodGet)
+	s.router.HandleFunc("/v1/history", documentResponse(s.handleHistory)).Methods(http.MethodGet)
+}
+
+// documentResponse wraps the endpoints whose responses carry an uploaded document or
+// the metadata derived from it, which is the very PII the service was handed.
+//
+// Nothing on that path may keep a copy: a 200 response to a GET with no freshness
+// directive is heuristically cacheable, and the result download hands out a
+// Last-Modified that invites exactly that, so a shared proxy or the browser disk cache
+// could still serve a masked file long after the retention sweep deleted it from disk.
+// nosniff keeps a client from second-guessing the declared type on the way out.
+func documentResponse(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		next(w, r)
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

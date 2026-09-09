@@ -698,6 +698,85 @@ func assertEncodedDisposition(t *testing.T, disposition, expectedName string) {
 	}
 }
 
+// TestDocumentResponsesAreNotCacheable walks every endpoint that hands back an
+// uploaded document or the metadata derived from it. Without an explicit directive a
+// 200 GET is heuristically cacheable, so a masked file or a PII summary could be kept
+// by a shared proxy or the browser disk cache past the retention window.
+func TestDocumentResponsesAreNotCacheable(t *testing.T) {
+	t.Parallel()
+
+	serverURL, _ := startAppServerWithConfig(t, nil)
+
+	requestBody, contentType := buildMultipartBody(t, "sample.pdf", "application/pdf", createBlankPDF(400, 400), nil)
+	maskResponse, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer maskResponse.Body.Close()
+	if maskResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(maskResponse.Body)
+		t.Fatalf("unexpected mask status %d: %s", maskResponse.StatusCode, string(body))
+	}
+	assertNotCacheable(t, "/v1/mask", maskResponse)
+
+	jobRequestBody, jobContentType := buildMultipartBody(t, "sample.pdf", "application/pdf", createBlankPDF(400, 400), nil)
+	jobResponse, err := http.Post(serverURL+"/v1/jobs", jobContentType, jobRequestBody)
+	if err != nil {
+		t.Fatalf("post /v1/jobs: %v", err)
+	}
+	defer jobResponse.Body.Close()
+	if jobResponse.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(jobResponse.Body)
+		t.Fatalf("unexpected job status %d: %s", jobResponse.StatusCode, string(body))
+	}
+	assertNotCacheable(t, "/v1/jobs", jobResponse)
+
+	var metadata core.ProcessMetadata
+	if err := json.NewDecoder(jobResponse.Body).Decode(&metadata); err != nil {
+		t.Fatalf("decode job metadata: %v", err)
+	}
+	waitForJobStatus(t, serverURL, metadata.JobID, "completed")
+
+	for _, path := range []string{
+		"/v1/jobs/" + url.PathEscape(metadata.JobID),
+		"/v1/jobs/" + url.PathEscape(metadata.JobID) + "/result",
+		"/v1/history",
+	} {
+		response, err := http.Get(serverURL + path)
+		if err != nil {
+			t.Fatalf("get %s: %v", path, err)
+		}
+		if response.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			t.Fatalf("unexpected status %d for %s: %s", response.StatusCode, path, string(body))
+		}
+		assertNotCacheable(t, path, response)
+		response.Body.Close()
+	}
+
+	// The health probe carries no document, so it is deliberately left cacheable.
+	healthResponse, err := http.Get(serverURL + "/v1/health")
+	if err != nil {
+		t.Fatalf("get /v1/health: %v", err)
+	}
+	defer healthResponse.Body.Close()
+	if got := healthResponse.Header.Get("Cache-Control"); got != "" {
+		t.Fatalf("unexpected cache-control %q on /v1/health", got)
+	}
+}
+
+func assertNotCacheable(t *testing.T, path string, response *http.Response) {
+	t.Helper()
+
+	if got := response.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q for %s, want %q", got, path, "no-store")
+	}
+	if got := response.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q for %s, want %q", got, path, "nosniff")
+	}
+}
+
 func createCompletedPDFJob(t *testing.T, serverURL string) string {
 	t.Helper()
 
