@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,6 +57,15 @@ type Service struct {
 	syncQueueWait time.Duration
 	// jobRetention is how long a finished job keeps its stored files. Zero keeps them.
 	jobRetention time.Duration
+	// draining is closed once the service starts stopping. A job that has not claimed
+	// a slot yet gives up instead of starting work the process has no time to finish.
+	draining chan struct{}
+	// drainMu keeps a runner from being registered after Shutdown started waiting for
+	// the registered ones.
+	drainMu sync.RWMutex
+	// runners tracks the job goroutines that are still masking a document, so a
+	// graceful stop can wait for them instead of discarding nearly finished work.
+	runners sync.WaitGroup
 }
 
 type ProcessInput struct {
@@ -104,6 +114,35 @@ func New(cfg config.Config, client *upstage.Client, jobStore *jobs.Store) *Servi
 		syncSlots:     make(chan struct{}, syncSlots),
 		syncQueueWait: cfg.Limits.SyncQueueWait,
 		jobRetention:  cfg.Storage.JobRetention,
+		draining:      make(chan struct{}),
+	}
+}
+
+// Shutdown stops starting new job runners and waits for the ones already masking a
+// document to finish, so a restart does not throw away work that was nearly done.
+// Async jobs outlive the request that queued them, so draining the HTTP server does
+// not cover them. It returns ctx.Err() if the deadline passes first; whatever was
+// still running then stays marked running and is reported as interrupted on the
+// next start.
+func (s *Service) Shutdown(ctx context.Context) error {
+	s.drainMu.Lock()
+	select {
+	case <-s.draining:
+	default:
+		close(s.draining)
+	}
+	s.drainMu.Unlock()
+
+	finished := make(chan struct{})
+	go func() {
+		s.runners.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -273,14 +312,74 @@ func (s *Service) CreateJob(ctx context.Context, input ProcessInput) (*core.JobR
 		return nil, err
 	}
 
-	go s.runJob(jobID, input.Options)
+	if !s.startJobRunner(jobID, input.Options) {
+		// The service began stopping between accepting the upload and starting its
+		// runner, so the job is recorded as interrupted right away instead of being
+		// left queued for a runner that will never come.
+		s.markJobInterrupted(job)
+	}
 	return job, nil
+}
+
+// startJobRunner launches the goroutine for a queued job and registers it so a
+// graceful stop waits for it. It reports false once the service is draining, in
+// which case no runner is started at all.
+func (s *Service) startJobRunner(jobID string, options upstage.ParseOptions) bool {
+	s.drainMu.RLock()
+	defer s.drainMu.RUnlock()
+	select {
+	case <-s.draining:
+		return false
+	default:
+	}
+	s.runners.Add(1)
+	go func() {
+		defer s.runners.Done()
+		s.runJob(jobID, options)
+	}()
+	return true
+}
+
+// acquireJobSlot reserves one of the job slots, unless the service starts draining
+// first. Draining is checked before the slot so a stop is not raced by a slot that
+// happens to free up at the same moment.
+func (s *Service) acquireJobSlot() bool {
+	select {
+	case <-s.draining:
+		return false
+	default:
+	}
+	select {
+	case s.jobSlots <- struct{}{}:
+		return true
+	case <-s.draining:
+		return false
+	}
+}
+
+// markJobInterrupted records that a job never started because the service is
+// stopping, so a client polling it gets an answer now instead of a job that stays
+// queued until the next start sweeps it up.
+func (s *Service) markJobInterrupted(job *core.JobRecord) {
+	job.Metadata.Status = "failed"
+	job.Metadata.UpdatedAt = time.Now().UTC()
+	job.Metadata.Error = &core.APIError{
+		Code:      "job_interrupted",
+		Message:   "서버 종료로 작업이 시작되지 못했습니다.",
+		Retryable: true,
+	}
+	_ = s.jobStore.Save(job)
 }
 
 // runJob waits for a free slot and only then reloads the stored upload, so a burst
 // of queued jobs costs one goroutine each instead of one full document in memory.
 func (s *Service) runJob(jobID string, options upstage.ParseOptions) {
-	s.jobSlots <- struct{}{}
+	if !s.acquireJobSlot() {
+		if job, ok, err := s.jobStore.Get(jobID); err == nil && ok {
+			s.markJobInterrupted(job)
+		}
+		return
+	}
 	defer func() { <-s.jobSlots }()
 
 	job, ok, err := s.jobStore.Get(jobID)

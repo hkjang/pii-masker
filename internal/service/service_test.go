@@ -324,6 +324,102 @@ func TestProcessSyncReportsBusyWithoutTouchingTheUpload(t *testing.T) {
 	}
 }
 
+func TestShutdownReturnsWhenNoJobIsRunning(t *testing.T) {
+	t.Parallel()
+
+	svc := newSyncService(t, 1, 0)
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+func TestShutdownWaitsForARunningJob(t *testing.T) {
+	t.Parallel()
+
+	svc := newSyncService(t, 1, 0)
+	svc.runners.Add(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := svc.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected the shutdown to wait for the runner, got %v", err)
+	}
+
+	svc.runners.Done()
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("expected the second shutdown to return once the runner finished, got %v", err)
+	}
+}
+
+func TestStartJobRunnerRefusesOnceTheServiceIsDraining(t *testing.T) {
+	t.Parallel()
+
+	svc := newSyncService(t, 1, 0)
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if svc.startJobRunner("job-1", upstage.ParseOptions{}) {
+		t.Fatal("expected no runner to be started while draining")
+	}
+}
+
+func TestAcquireJobSlotGivesUpWhenTheServiceDrains(t *testing.T) {
+	t.Parallel()
+
+	svc := newSyncService(t, 1, 0)
+	// Every slot is taken, so the next runner has to wait for one.
+	for range cap(svc.jobSlots) {
+		svc.jobSlots <- struct{}{}
+	}
+
+	acquired := make(chan bool, 1)
+	go func() { acquired <- svc.acquireJobSlot() }()
+
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case got := <-acquired:
+		if got {
+			t.Fatal("expected the waiting runner to give up instead of starting work")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the runner to give up")
+	}
+}
+
+// TestCreateJobRecordsAnInterruptedJobWhileDraining covers the race between accepting
+// an upload and the service starting to stop: the job is persisted either way, so it
+// has to be reported as interrupted rather than left queued forever.
+func TestCreateJobRecordsAnInterruptedJobWhileDraining(t *testing.T) {
+	t.Parallel()
+
+	svc := newUploadService(t)
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	input := ProcessInput{Attachment: document.NewAttachment("sample.png", "image/png", createWhitePNG(t, 20, 10))}
+	job, err := svc.CreateJob(context.Background(), input)
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if job.Metadata.Status != "failed" {
+		t.Fatalf("unexpected status %q", job.Metadata.Status)
+	}
+	if job.Metadata.Error == nil || job.Metadata.Error.Code != "job_interrupted" {
+		t.Fatalf("unexpected error payload %#v", job.Metadata.Error)
+	}
+
+	stored, ok, err := svc.GetJob(job.ID)
+	if err != nil || !ok {
+		t.Fatalf("GetJob(%s) = %v, %v", job.ID, ok, err)
+	}
+	if stored.Metadata.Status != "failed" {
+		t.Fatalf("the stored job kept status %q", stored.Metadata.Status)
+	}
+}
+
 func newSyncService(t *testing.T, limit int, queueWait time.Duration) *Service {
 	t.Helper()
 
@@ -334,6 +430,27 @@ func newSyncService(t *testing.T, limit int, queueWait time.Duration) *Service {
 	}
 	cfg := config.Config{
 		Limits:  config.LimitsConfig{MaxConcurrentSync: limit, SyncQueueWait: queueWait},
+		Storage: config.StorageConfig{RootDir: root},
+	}
+	return New(cfg, upstage.NewClient(cfg.Upstage), jobStore)
+}
+
+// newUploadService accepts the uploads the other helpers do not, so a job can be
+// created without standing up an upstream for it.
+func newUploadService(t *testing.T) *Service {
+	t.Helper()
+
+	root := t.TempDir()
+	jobStore, err := jobs.New(root)
+	if err != nil {
+		t.Fatalf("jobs.New: %v", err)
+	}
+	cfg := config.Config{
+		Limits: config.LimitsConfig{
+			MaxFileSizeBytes: 5 * 1024 * 1024,
+			MaxPages:         5,
+			SupportedMIMEs:   []string{"image/png"},
+		},
 		Storage: config.StorageConfig{RootDir: root},
 	}
 	return New(cfg, upstage.NewClient(cfg.Upstage), jobStore)
