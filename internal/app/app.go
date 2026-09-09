@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"time"
@@ -18,6 +19,8 @@ import (
 type App struct {
 	server *http.Server
 	api    *httpapi.Server
+	// svc owns the async job runners, which outlive the request that queued them.
+	svc *service.Service
 	// stop ends the background workers that outlive a single request.
 	stop context.CancelFunc
 	// shutdownTimeout bounds how long a graceful stop waits for in-flight
@@ -52,6 +55,7 @@ func New(cfg config.Config) (*App, error) {
 			IdleTimeout:       orDefault(cfg.Server.IdleTimeout, config.DefaultIdleTimeout),
 		},
 		api:             apiServer,
+		svc:             svc,
 		stop:            cancel,
 		shutdownTimeout: orDefault(cfg.Server.ShutdownTimeout, config.DefaultShutdownTimeout),
 	}, nil
@@ -79,8 +83,9 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 // Serve accepts connections on listener until ctx is cancelled. On cancellation
-// it stops accepting new connections, gives the requests already in flight up to
-// shutdownTimeout to finish, and only then stops the background workers.
+// it stops accepting new connections, gives the requests already in flight and the
+// async jobs already masking a document up to shutdownTimeout together to finish,
+// and only then stops the background workers.
 func (a *App) Serve(ctx context.Context, listener net.Listener) error {
 	serveErr := make(chan error, 1)
 	go func() {
@@ -100,6 +105,12 @@ func (a *App) Serve(ctx context.Context, listener net.Listener) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
 	defer cancel()
 	err := a.server.Shutdown(shutdownCtx)
+	// An async job is not a request, so draining the HTTP server does not wait for
+	// it. Missing the deadline is not a server error: those jobs keep their stored
+	// files and are reported as interrupted on the next start.
+	if jobErr := a.svc.Shutdown(shutdownCtx); jobErr != nil {
+		log.Printf("async jobs did not finish before the shutdown deadline: %v", jobErr)
+	}
 	a.Close()
 	<-serveErr
 	return err
