@@ -124,7 +124,19 @@ func (s *Store) writeFile(jobID, filename string, content []byte) (string, error
 	return fullPath, nil
 }
 
+// load reads every stored job back into memory. A job that was still queued or
+// running when the process stopped cannot be resumed, so it is recorded as
+// interrupted and that transition is written back to disk.
+//
+// The interrupted record deliberately keeps the timestamp the job last had.
+// Moving it to the current time would push the retention deadline of the stored
+// upload - the original, unmasked document - a full retention window into the
+// future, and because the transition happens on every start a service that
+// restarts more often than that would keep those files forever.
 func (s *Store) load() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	entries, err := os.ReadDir(s.root)
 	if err != nil {
 		return fmt.Errorf("failed to read jobs dir: %w", err)
@@ -144,16 +156,21 @@ func (s *Store) load() error {
 		jobDir := filepath.Join(s.root, entry.Name())
 		job.InputPath = firstExistingFile(jobDir, "input_")
 		job.OutputPath = firstExistingFile(jobDir, "output_")
-		if job.Metadata.Status == "queued" || job.Metadata.Status == "running" {
+		interrupted := job.Metadata.Status == "queued" || job.Metadata.Status == "running"
+		if interrupted {
 			job.Metadata.Status = "failed"
 			job.Metadata.Error = &core.APIError{
 				Code:      "job_interrupted",
 				Message:   "서버 재기동으로 작업이 중단되었습니다.",
 				Retryable: true,
 			}
-			job.Metadata.UpdatedAt = time.Now().UTC()
 		}
 		s.jobs[job.ID] = cloneJob(&job)
+		if interrupted {
+			// Best effort: a directory that cannot be written only means the next
+			// start repeats the same transition, which changes nothing.
+			_ = s.persistLocked(job.ID)
+		}
 	}
 	return nil
 }
