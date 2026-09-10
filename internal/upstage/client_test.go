@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -312,6 +313,87 @@ func TestTestConnectionRejectsHostOutsideAllowList(t *testing.T) {
 	if called {
 		t.Fatal("the connection test must not reach a host outside the allow list")
 	}
+}
+
+func TestParseDocumentReportsOversizedResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeOversizedJSON(w)
+	}))
+	defer server.Close()
+
+	client := NewClient(config.UpstageConfig{
+		BaseURL: server.URL,
+		Timeout: 30 * time.Second,
+		Model:   "pii",
+	})
+
+	attachment := document.NewAttachment("sample.png", "image/png", createPNG(t, 40, 20))
+	_, statusCode, _, err := client.ParseDocument(context.Background(), attachment, ParseOptions{})
+	if err == nil {
+		t.Fatal("expected an oversized response to fail the request")
+	}
+	var callErr *CallError
+	if !errors.As(err, &callErr) {
+		t.Fatalf("expected a *CallError, got %T", err)
+	}
+	if callErr.Code != "response_too_large" {
+		t.Fatalf("unexpected error code %q", callErr.Code)
+	}
+	if callErr.Retryable {
+		t.Fatal("a response that does not fit the buffer will not fit on a retry either")
+	}
+	if statusCode != http.StatusOK {
+		t.Fatalf("expected the upstream status to be reported, got %d", statusCode)
+	}
+}
+
+func TestParseDocumentPrefersStatusOverOversizedResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeOversizedJSON(w)
+	}))
+	defer server.Close()
+
+	client := NewClient(config.UpstageConfig{
+		BaseURL: server.URL,
+		Timeout: 30 * time.Second,
+		Model:   "pii",
+	})
+
+	attachment := document.NewAttachment("sample.png", "image/png", createPNG(t, 40, 20))
+	_, _, _, err := client.ParseDocument(context.Background(), attachment, ParseOptions{})
+	if err == nil {
+		t.Fatal("expected the 500 response to fail the request")
+	}
+	var callErr *CallError
+	if !errors.As(err, &callErr) {
+		t.Fatalf("expected a *CallError, got %T", err)
+	}
+	if callErr.Code != "server_error" {
+		t.Fatalf("unexpected error code %q", callErr.Code)
+	}
+}
+
+// writeOversizedJSON streams a well-formed JSON body that runs past the response
+// buffer cap. The client stops reading partway through, so a failed write just
+// ends the body instead of failing the test.
+func writeOversizedJSON(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	if _, err := io.WriteString(w, `{"model":"pii","content":{"text":"`); err != nil {
+		return
+	}
+
+	chunk := strings.Repeat("x", 64*1024)
+	for written := 0; written <= maxUpstreamResponseBytes; written += len(chunk) {
+		if _, err := io.WriteString(w, chunk); err != nil {
+			return
+		}
+	}
+	_, _ = io.WriteString(w, `"}}`)
 }
 
 func hostPort(t *testing.T, rawURL string) string {
