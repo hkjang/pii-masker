@@ -28,6 +28,12 @@ import (
 // may be followed before the request is abandoned.
 const maxUpstreamRedirects = 5
 
+// maxUpstreamResponseBytes bounds how much of an inference response is buffered.
+// The whole body is held in memory while the document is re-rendered, so it has
+// to be capped; a body that runs past the cap is reported as its own error
+// instead of being decoded as truncated JSON.
+const maxUpstreamResponseBytes = 8 * 1024 * 1024
+
 type Client struct {
 	config config.UpstageConfig
 }
@@ -277,15 +283,30 @@ func (c *Client) performParseRequest(ctx context.Context, originalAttachment doc
 	}
 	defer response.Body.Close()
 
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 8*1024*1024))
+	// Reading one byte past the cap is what tells a body that merely fills it
+	// apart from one that was cut short, so an oversized response is not handed
+	// to the JSON decoder as if the endpoint had returned malformed output.
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxUpstreamResponseBytes+1))
 	if err != nil {
 		callErr := newCallError("response_read_failed", "Upstage 응답 본문을 읽는 중 오류가 발생했습니다.", err.Error(), "Upstage 응답 크기 제한과 네트워크 상태를 확인하세요.", c.config.BaseURL, response.StatusCode, true)
 		return DocumentResult{}, response.StatusCode, callErr.withDebug(requestDebug, buildResponseDebug(response.StatusCode, response.Header, nil, callErr))
 	}
+	oversized := len(responseBody) > maxUpstreamResponseBytes
+	if oversized {
+		responseBody = responseBody[:maxUpstreamResponseBytes]
+	}
 
+	// An error status is classified first even when the body is oversized: the
+	// status says more about what went wrong than the size does.
 	if response.StatusCode >= http.StatusBadRequest {
 		callErr := classifyHTTPError(c.config.BaseURL, response.StatusCode, response.Header, responseBody)
 		return DocumentResult{}, response.StatusCode, attachDebug(callErr, requestDebug, buildResponseDebug(response.StatusCode, response.Header, responseBody, callErr))
+	}
+
+	if oversized {
+		detail := fmt.Sprintf("응답 본문이 허용 한도 %dMB 를 넘어 끝까지 읽지 못했습니다.", maxUpstreamResponseBytes/(1024*1024))
+		callErr := newCallError("response_too_large", "Upstage 응답이 너무 커서 처리하지 못했습니다.", detail, "문서를 나눠서 요청해 페이지 수를 줄이거나 verbose 옵션을 끄고 다시 시도하세요.", c.config.BaseURL, response.StatusCode, false)
+		return DocumentResult{}, response.StatusCode, callErr.withDebug(requestDebug, buildResponseDebug(response.StatusCode, response.Header, responseBody, callErr))
 	}
 
 	var parsed ParseResponse
