@@ -249,6 +249,17 @@ func newUpstreamService(t *testing.T, upstreamURL string) *Service {
 	return New(cfg, upstage.NewClient(cfg.Upstage), jobStore)
 }
 
+func TestJoinPublicURLFallsBackToARelativePath(t *testing.T) {
+	t.Parallel()
+
+	if got := JoinPublicURL("", "v1", "jobs", "abc", "result"); got != "/v1/jobs/abc/result" {
+		t.Fatalf("expected a relative path without a base url, got %q", got)
+	}
+	if got := JoinPublicURL("https://pii.example.com/", "v1", "jobs", "abc", "result"); got != "https://pii.example.com/v1/jobs/abc/result" {
+		t.Fatalf("unexpected absolute url %q", got)
+	}
+}
+
 func TestLoadJobInputReadsStoredUpload(t *testing.T) {
 	t.Parallel()
 

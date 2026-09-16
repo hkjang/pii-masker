@@ -320,6 +320,9 @@ func TestIndexPageIsServed(t *testing.T) {
 	if !strings.Contains(string(body), "PII Masker API Playground") {
 		t.Fatalf("unexpected index body: %s", string(body))
 	}
+	if got := response.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("expected the page to be revalidated on every load, got Cache-Control %q", got)
+	}
 }
 
 func TestCreateJobRejectsUnsupportedTypeWithoutPersisting(t *testing.T) {

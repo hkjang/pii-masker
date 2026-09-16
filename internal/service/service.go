@@ -745,11 +745,11 @@ func defaultIfEmpty(value, fallback string) string {
 	return value
 }
 
+// JoinPublicURL builds the URL a client should call for parts. Without a configured
+// public base URL the result is a path relative to the server, so a job's download
+// link still works from the bundled UI and from clients that talk to the same host.
 func JoinPublicURL(baseURL string, parts ...string) string {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if baseURL == "" {
-		return ""
-	}
 	cleaned := make([]string, 0, len(parts))
 	for _, part := range parts {
 		cleaned = append(cleaned, strings.Trim(part, "/"))

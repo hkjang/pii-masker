@@ -79,6 +79,10 @@ func collectFieldEntriesRecursive(value any, seen map[string]struct{}, entries *
 				}
 				if pageNumber, ok := extractEntityPageNumber(typed); ok {
 					entry.PageNumber = pageNumber
+				} else if bboxes := parseBoundingBoxes(extractGeometryCandidate(typed)); len(bboxes) > 0 {
+					// Endpoints that put the page on each box rather than on
+					// the field still get a page in the summary.
+					entry.PageNumber = bboxes[0].PageNumber
 				}
 				seen[signature] = struct{}{}
 				*entries = append(*entries, entry)

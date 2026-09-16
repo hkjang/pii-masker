@@ -14,6 +14,7 @@
       --accent: #d97706;
       --accent-strong: #9a3412;
       --ok: #1d6b4f;
+      --warn: #92400e;
       --error: #b42318;
       --shadow: 0 22px 60px rgba(20, 33, 61, 0.12);
     }
@@ -31,7 +32,7 @@
     }
 
     .shell {
-      width: min(1120px, calc(100vw - 32px));
+      width: min(1180px, calc(100vw - 32px));
       margin: 24px auto 40px;
       display: grid;
       gap: 20px;
@@ -61,7 +62,7 @@
 
     h1 {
       margin: 0;
-      font-size: clamp(28px, 4vw, 48px);
+      font-size: clamp(28px, 4vw, 44px);
       line-height: 1.05;
     }
 
@@ -76,6 +77,7 @@
       display: grid;
       grid-template-columns: 1.15fr 0.85fr;
       gap: 20px;
+      align-items: start;
     }
 
     .panel {
@@ -87,6 +89,14 @@
     .panel h2 {
       margin: 0;
       font-size: 20px;
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
     }
 
     .upload-zone {
@@ -113,7 +123,10 @@
     .file-meta {
       font-size: 14px;
       color: var(--muted);
+      margin: 0;
     }
+
+    .file-meta.invalid { color: var(--error); font-weight: 600; }
 
     .controls {
       display: grid;
@@ -173,6 +186,11 @@
       color: var(--ink);
     }
 
+    .small {
+      padding: 8px 12px;
+      font-size: 13px;
+    }
+
     .status {
       border-radius: 16px;
       padding: 14px 16px;
@@ -183,7 +201,23 @@
     }
 
     .status.ok { background: rgba(29, 107, 79, 0.12); color: var(--ok); }
+    .status.warn { background: rgba(217, 119, 6, 0.14); color: var(--warn); }
     .status.error { background: rgba(180, 35, 24, 0.12); color: var(--error); }
+    .status .detail {
+      display: block;
+      margin-top: 6px;
+      font-size: 13px;
+      opacity: 0.85;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .status .code {
+      font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+      font-size: 12px;
+      padding: 2px 6px;
+      border-radius: 6px;
+      background: rgba(20, 33, 61, 0.08);
+    }
 
     .stack {
       display: grid;
@@ -199,7 +233,24 @@
       overflow: auto;
       font-size: 12px;
       line-height: 1.55;
+      max-height: 420px;
     }
+
+    details > summary {
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--muted);
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    details > summary::-webkit-details-marker { display: none; }
+    details > summary::before { content: "▸ "; }
+    details[open] > summary::before { content: "▾ "; }
+    details .stack { margin-top: 12px; }
 
     .pill-row {
       display: flex;
@@ -215,6 +266,145 @@
       color: var(--muted);
     }
 
+    .pill.rule {
+      background: rgba(217, 119, 6, 0.14);
+      color: var(--accent-strong);
+      font-weight: 600;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      background: rgba(20, 33, 61, 0.1);
+      color: var(--ink);
+    }
+    .badge.completed { background: rgba(29, 107, 79, 0.16); color: var(--ok); }
+    .badge.failed { background: rgba(180, 35, 24, 0.14); color: var(--error); }
+    .badge.running, .badge.queued { background: rgba(217, 119, 6, 0.16); color: var(--warn); }
+
+    .summary-card {
+      display: grid;
+      gap: 14px;
+      padding: 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(20, 33, 61, 0.12);
+      background: rgba(255, 255, 255, 0.72);
+    }
+
+    .summary-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .summary-head strong {
+      font-size: 15px;
+      overflow-wrap: anywhere;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 10px;
+    }
+
+    .stat {
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(20, 33, 61, 0.05);
+      display: grid;
+      gap: 2px;
+    }
+
+    .stat .label {
+      font-size: 11px;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .stat .value {
+      font-size: 18px;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .stat.warn { background: rgba(217, 119, 6, 0.14); }
+    .stat.warn .value { color: var(--warn); }
+
+    .table-wrap {
+      overflow-x: auto;
+      border-radius: 14px;
+      border: 1px solid rgba(20, 33, 61, 0.1);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      background: rgba(255, 255, 255, 0.6);
+    }
+
+    th, td {
+      text-align: left;
+      padding: 9px 12px;
+      border-bottom: 1px solid rgba(20, 33, 61, 0.08);
+      vertical-align: top;
+    }
+
+    th {
+      white-space: nowrap;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: rgba(20, 33, 61, 0.04);
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    td.mono {
+      font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+      font-size: 12.5px;
+      white-space: nowrap;
+    }
+
+    .preview-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .preview {
+      display: grid;
+      gap: 8px;
+    }
+
+    .preview .caption {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .preview img, .preview iframe {
+      width: 100%;
+      border-radius: 14px;
+      border: 1px solid rgba(20, 33, 61, 0.12);
+      background: repeating-conic-gradient(rgba(20, 33, 61, 0.06) 0 25%, transparent 0 50%) 0 0 / 20px 20px;
+    }
+
+    .preview img { height: auto; }
+    .preview iframe { height: 420px; }
+
     .history {
       display: grid;
       gap: 10px;
@@ -225,11 +415,19 @@
       border-radius: 18px;
       border: 1px solid rgba(20, 33, 61, 0.12);
       background: rgba(255, 255, 255, 0.7);
+      display: grid;
+      gap: 8px;
+    }
+
+    .history-item .row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
     }
 
     .history-item strong {
-      display: block;
-      margin-bottom: 6px;
+      overflow-wrap: anywhere;
     }
 
     .muted {
@@ -237,9 +435,19 @@
       font-size: 13px;
     }
 
+    .empty {
+      padding: 18px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 14px;
+      border-radius: 16px;
+      border: 1px dashed rgba(20, 33, 61, 0.16);
+    }
+
     @media (max-width: 920px) {
       .grid { grid-template-columns: 1fr; }
       .controls { grid-template-columns: 1fr; }
+      .preview-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -248,7 +456,7 @@
     <section class="hero">
       <span class="eyebrow">PII Masker Playground</span>
       <h1>PDF/PNG/JPG/JPEG 파일을 올리고 바로 마스킹 결과를 확인하세요.</h1>
-      <p>이 페이지는 현재 API 서버 위에 직접 붙어 있습니다. 파일 업로드, 비동기 작업 생성, 상태 조회, 결과 다운로드까지 한 화면에서 테스트할 수 있습니다.</p>
+      <p>이 페이지는 현재 API 서버 위에 직접 붙어 있습니다. 동기 마스킹(<code>/v1/mask</code>)과 비동기 작업(<code>/v1/jobs</code>) 둘 다 테스트할 수 있고, 어떤 필드가 어떻게 가려졌는지와 원본·결과 미리보기를 한 화면에서 확인합니다.</p>
       <div class="pill-row" id="config-pills"></div>
     </section>
 
@@ -295,21 +503,34 @@
         </div>
 
         <div class="actions">
-          <button class="primary" id="process-now" type="button">업로드 후 완료까지 기다리기</button>
+          <button class="primary" id="process-now" type="button">비동기 작업 후 완료까지 기다리기</button>
+          <button class="secondary" id="process-sync" type="button">동기 처리 (/v1/mask)</button>
           <button class="secondary" id="create-job" type="button">잡만 생성</button>
-          <button class="secondary" id="refresh-history" type="button">최근 작업 새로고침</button>
         </div>
 
         <div id="status" class="status">대기 중입니다.</div>
 
-        <div class="stack">
+        <div class="stack" id="result-root" hidden>
+          <div class="summary-card" id="summary-card"></div>
           <div class="actions" id="download-actions"></div>
-          <pre id="result-json">아직 실행 결과가 없습니다.</pre>
+          <div id="preview-root"></div>
+          <details id="raw-details">
+            <summary>
+              <span>원시 메타데이터 JSON</span>
+              <button class="secondary small" id="copy-json" type="button">복사</button>
+            </summary>
+            <div class="stack">
+              <pre id="result-json"></pre>
+            </div>
+          </details>
         </div>
       </div>
 
       <div class="panel">
-        <h2>최근 작업</h2>
+        <div class="panel-head">
+          <h2>최근 작업</h2>
+          <button class="secondary small" id="refresh-history" type="button">새로고침</button>
+        </div>
         <div id="history" class="history">
           <div class="muted">로딩 중...</div>
         </div>
@@ -321,23 +542,39 @@
     const fileInput = document.getElementById('file-input');
     const chooseFileButton = document.getElementById('choose-file');
     const processNowButton = document.getElementById('process-now');
+    const processSyncButton = document.getElementById('process-sync');
     const createJobButton = document.getElementById('create-job');
     const refreshHistoryButton = document.getElementById('refresh-history');
+    const copyJsonButton = document.getElementById('copy-json');
     const uploadZone = document.getElementById('upload-zone');
     const fileMeta = document.getElementById('file-meta');
     const statusBox = document.getElementById('status');
+    const resultRoot = document.getElementById('result-root');
+    const summaryCard = document.getElementById('summary-card');
+    const previewRoot = document.getElementById('preview-root');
     const resultJson = document.getElementById('result-json');
     const downloadActions = document.getElementById('download-actions');
     const historyRoot = document.getElementById('history');
     const configPills = document.getElementById('config-pills');
 
     let selectedFile = null;
+    let serverConfig = null;
+    let lastMetadata = null;
+    // Object URLs created for previews and sync downloads are revoked before the
+    // next run so a long session does not keep every rendered document in memory.
+    let objectURLs = [];
 
     chooseFileButton.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', () => setSelectedFile(fileInput.files[0] || null));
     processNowButton.addEventListener('click', () => submitAndWait());
+    processSyncButton.addEventListener('click', () => submitSync());
     createJobButton.addEventListener('click', () => createJob(false));
     refreshHistoryButton.addEventListener('click', () => loadHistory());
+    copyJsonButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      copyMetadata();
+    });
 
     ['dragenter', 'dragover'].forEach((eventName) => {
       uploadZone.addEventListener(eventName, (event) => {
@@ -364,16 +601,55 @@
 
     function setSelectedFile(file) {
       selectedFile = file;
+      fileMeta.classList.remove('invalid');
       if (!file) {
         fileMeta.textContent = '선택된 파일이 없습니다.';
+        return;
+      }
+      const problem = validateFile(file);
+      if (problem) {
+        fileMeta.classList.add('invalid');
+        fileMeta.textContent = `${file.name} · ${formatBytes(file.size)} · ${problem}`;
         return;
       }
       fileMeta.textContent = `${file.name} · ${formatBytes(file.size)} · ${file.type || 'mime 미확인'}`;
     }
 
+    // validateFile mirrors the server's upload limits so an oversized or unsupported
+    // file is refused here instead of after the whole upload was sent.
+    function validateFile(file) {
+      if (!serverConfig) {
+        return null;
+      }
+      const maxBytes = serverConfig.limits?.max_file_size_bytes;
+      if (maxBytes && file.size > maxBytes) {
+        return `최대 크기 ${formatBytes(maxBytes)}를 넘습니다`;
+      }
+      const supported = serverConfig.supported_types || [];
+      const mime = normalizeMime(file.type || mimeFromName(file.name));
+      if (supported.length && !supported.includes(mime)) {
+        return `지원하지 않는 형식입니다 (${mime || '알 수 없음'})`;
+      }
+      return null;
+    }
+
+    function normalizeMime(value) {
+      const lowered = (value || '').toLowerCase();
+      return lowered === 'image/jpg' ? 'image/jpeg' : lowered;
+    }
+
+    function mimeFromName(name) {
+      const ext = (name.split('.').pop() || '').toLowerCase();
+      return { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg' }[ext] || '';
+    }
+
     function buildFormData() {
       if (!selectedFile) {
         throw new Error('먼저 파일을 선택하세요.');
+      }
+      const problem = validateFile(selectedFile);
+      if (problem) {
+        throw new Error(`업로드할 수 없습니다: ${problem}.`);
       }
       const formData = new FormData();
       formData.append('file', selectedFile);
@@ -394,35 +670,151 @@
         }
         await waitForCompletion(metadata.job_id);
       } catch (error) {
-        setStatus(error.message || '요청 처리 중 오류가 발생했습니다.', 'error');
+        showError(error);
       } finally {
         setBusy(false);
       }
     }
 
+    // submitSync exercises the synchronous endpoint. Its response is multipart/mixed
+    // with the metadata JSON in the first part and the masked file in the second,
+    // which the browser does not split for us, so it is parsed here.
+    async function submitSync() {
+      try {
+        setBusy(true);
+        resetResult();
+        const formData = buildFormData();
+        setStatus('동기 마스킹 요청을 보냈습니다. 응답을 기다리는 중입니다.', 'default');
+        const startedAt = performance.now();
+        const response = await fetch('/v1/mask', { method: 'POST', body: formData });
+        const elapsed = Math.round(performance.now() - startedAt);
+        const contentType = response.headers.get('Content-Type') || '';
+        if (!contentType.startsWith('multipart/mixed')) {
+          const payload = await response.json().catch(() => null);
+          if (!response.ok) {
+            throw errorFromPayload(payload, response.status);
+          }
+          throw new Error(`예상하지 못한 응답 형식입니다: ${contentType || '(없음)'}`);
+        }
+        const parts = parseMultipartMixed(await response.arrayBuffer(), contentType);
+        if (parts.length < 2) {
+          throw new Error(`multipart 응답에 파트가 ${parts.length}개뿐입니다.`);
+        }
+        const metadata = JSON.parse(new TextDecoder().decode(parts[0].body));
+        const fileType = parts[1].headers['content-type'] || metadata.output?.mime_type || 'application/octet-stream';
+        const blob = new Blob([parts[1].body], { type: fileType });
+        const url = trackObjectURL(URL.createObjectURL(blob));
+        renderMetadata(metadata);
+        addDownloadLink(url, metadata.output?.file_name || 'masked-result', true);
+        renderPreview(metadata, url);
+        describeCompletion(metadata, `동기 마스킹 완료 (${elapsed} ms, ${formatBytes(blob.size)})`);
+      } catch (error) {
+        showError(error);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    // parseMultipartMixed splits a multipart body on its boundary and returns each
+    // part's lowercased headers and raw bytes.
+    function parseMultipartMixed(buffer, contentType) {
+      const match = /boundary="?([^";]+)"?/i.exec(contentType);
+      if (!match) {
+        throw new Error('multipart 응답에 boundary가 없습니다.');
+      }
+      const bytes = new Uint8Array(buffer);
+      const delimiter = encodeASCII(`--${match[1]}`);
+      const parts = [];
+      let cursor = indexOfBytes(bytes, delimiter, 0);
+      while (cursor !== -1) {
+        let position = cursor + delimiter.length;
+        if (bytes[position] === 0x2d && bytes[position + 1] === 0x2d) {
+          break;
+        }
+        position = skipLineBreak(bytes, position);
+        const headerEnd = indexOfBytes(bytes, encodeASCII('\r\n\r\n'), position);
+        if (headerEnd === -1) {
+          break;
+        }
+        const headerText = new TextDecoder().decode(bytes.subarray(position, headerEnd));
+        const headers = {};
+        headerText.split('\r\n').forEach((line) => {
+          const separator = line.indexOf(':');
+          if (separator > 0) {
+            headers[line.slice(0, separator).trim().toLowerCase()] = line.slice(separator + 1).trim();
+          }
+        });
+        const bodyStart = headerEnd + 4;
+        const next = indexOfBytes(bytes, delimiter, bodyStart);
+        if (next === -1) {
+          break;
+        }
+        let bodyEnd = next;
+        if (bytes[bodyEnd - 2] === 0x0d && bytes[bodyEnd - 1] === 0x0a) {
+          bodyEnd -= 2;
+        } else if (bytes[bodyEnd - 1] === 0x0a) {
+          bodyEnd -= 1;
+        }
+        parts.push({ headers, body: bytes.slice(bodyStart, bodyEnd) });
+        cursor = next;
+      }
+      return parts;
+    }
+
+    function skipLineBreak(bytes, position) {
+      if (bytes[position] === 0x0d && bytes[position + 1] === 0x0a) {
+        return position + 2;
+      }
+      if (bytes[position] === 0x0a) {
+        return position + 1;
+      }
+      return position;
+    }
+
+    function encodeASCII(text) {
+      const out = new Uint8Array(text.length);
+      for (let index = 0; index < text.length; index += 1) {
+        out[index] = text.charCodeAt(index) & 0xff;
+      }
+      return out;
+    }
+
+    function indexOfBytes(haystack, needle, from) {
+      outer: for (let index = from; index <= haystack.length - needle.length; index += 1) {
+        for (let offset = 0; offset < needle.length; offset += 1) {
+          if (haystack[index + offset] !== needle[offset]) {
+            continue outer;
+          }
+        }
+        return index;
+      }
+      return -1;
+    }
+
     async function createJob(waitMessage) {
       try {
         setBusy(true);
+        resetResult();
+        const formData = buildFormData();
         if (waitMessage) {
-          setStatus('비동기 작업을 생성했습니다. 완료될 때까지 상태를 추적합니다.', 'default');
+          setStatus('비동기 작업을 생성합니다. 완료될 때까지 상태를 추적합니다.', 'default');
         } else {
           setStatus('비동기 작업을 생성하는 중입니다.', 'default');
         }
-        clearDownloads();
         const response = await fetch('/v1/jobs', {
           method: 'POST',
-          body: buildFormData(),
+          body: formData,
         });
         const metadata = await response.json();
         if (!response.ok) {
-          throw new Error(extractError(metadata));
+          throw errorFromPayload(metadata, response.status);
         }
         renderMetadata(metadata);
         setStatus(`작업 생성 완료: ${metadata.job_id}`, 'ok');
         await loadHistory();
         return metadata;
       } catch (error) {
-        setStatus(error.message || '작업 생성 실패', 'error');
+        showError(error);
         throw error;
       } finally {
         setBusy(false);
@@ -434,17 +826,19 @@
         const response = await fetch(`/v1/jobs/${encodeURIComponent(jobId)}`);
         const metadata = await response.json();
         if (!response.ok) {
-          throw new Error(extractError(metadata));
+          throw errorFromPayload(metadata, response.status);
         }
         renderMetadata(metadata);
         if (metadata.status === 'completed') {
-          setStatus(`작업 완료: ${jobId}`, 'ok');
-          addDownloadLink(metadata.output?.download_url, metadata.output?.file_name || 'masked-result');
+          addDownloadLink(metadata.output?.download_url, metadata.output?.file_name || 'masked-result', false);
+          renderPreview(metadata, metadata.output?.download_url);
+          describeCompletion(metadata, `작업 완료: ${jobId}`);
           await loadHistory();
           return;
         }
         if (metadata.status === 'failed') {
-          throw new Error(extractError(metadata));
+          await loadHistory();
+          throw errorFromPayload(metadata, 0);
         }
         setStatus(`작업 진행 중: ${metadata.status}`, 'default');
         await new Promise((resolve) => setTimeout(resolve, 1200));
@@ -452,9 +846,23 @@
       throw new Error('작업이 시간 안에 완료되지 않았습니다.');
     }
 
+    // describeCompletion turns a completed result into a status line. A result with
+    // nothing drawn is called out, because the downloaded file is then the upload
+    // itself and that is easy to mistake for a masking failure.
+    function describeCompletion(metadata, headline) {
+      const regions = metadata.mask_policy?.applied_regions ?? 0;
+      const fields = metadata.pii_summary?.length ?? 0;
+      if (regions === 0) {
+        setStatus(headline, 'warn', `추론 엔드포인트가 PII를 하나도 보고하지 않아 원본 파일이 그대로 반환되었습니다. 검출되어야 할 정보가 있다면 model/schema 설정과 엔드포인트 응답 형식을 확인하세요.`);
+        return;
+      }
+      setStatus(headline, 'ok', `PII 필드 ${fields}개를 찾아 영역 ${regions}곳을 가렸습니다.`);
+    }
+
     async function loadConfig() {
       const response = await fetch('/v1/config/public');
       const payload = await response.json();
+      serverConfig = payload;
       configPills.innerHTML = '';
       const pills = [
         `최대 파일 크기 ${formatBytes(payload.limits.max_file_size_bytes)}`,
@@ -467,6 +875,9 @@
         span.textContent = text;
         configPills.appendChild(span);
       });
+      if (selectedFile) {
+        setSelectedFile(selectedFile);
+      }
     }
 
     async function loadHistory() {
@@ -475,49 +886,234 @@
       const payload = await response.json();
       const items = payload.items || [];
       if (!items.length) {
-        historyRoot.innerHTML = '<div class="muted">아직 작업 이력이 없습니다.</div>';
+        historyRoot.innerHTML = '<div class="empty">아직 작업 이력이 없습니다.</div>';
         return;
       }
       historyRoot.innerHTML = '';
       items.forEach((item) => {
         const card = document.createElement('div');
         card.className = 'history-item';
+
+        const head = document.createElement('div');
+        head.className = 'row';
+        head.appendChild(statusBadge(item.status));
         const title = document.createElement('strong');
-        title.textContent = `${item.status.toUpperCase()} · ${item.input?.file_name || 'unknown'}`;
+        title.textContent = item.input?.file_name || 'unknown';
+        head.appendChild(title);
+
         const meta = document.createElement('div');
         meta.className = 'muted';
-        meta.textContent = `${new Date(item.updated_at).toLocaleString()} · ${item.output?.mime_type || item.input?.mime_type || '-'}`;
+        const bits = [new Date(item.updated_at).toLocaleString(), item.output?.mime_type || item.input?.mime_type || '-'];
+        if (item.status === 'completed') {
+          bits.push(`영역 ${item.mask_policy?.applied_regions ?? 0}곳`);
+        }
+        if (item.status === 'failed' && item.error?.code) {
+          bits.push(item.error.code);
+        }
+        meta.textContent = bits.join(' · ');
+
         const buttonRow = document.createElement('div');
         buttonRow.className = 'actions';
         const inspectButton = document.createElement('button');
-        inspectButton.className = 'secondary';
-        inspectButton.textContent = '상태 보기';
+        inspectButton.className = 'secondary small';
+        inspectButton.textContent = '결과 보기';
         inspectButton.type = 'button';
-        inspectButton.addEventListener('click', () => waitForCompletion(item.job_id || item.request_id));
+        inspectButton.addEventListener('click', () => inspectJob(item.job_id || item.request_id));
         buttonRow.appendChild(inspectButton);
         if (item.output?.download_url) {
           const link = document.createElement('a');
-          link.className = 'download-link';
+          link.className = 'download-link small';
           link.href = item.output.download_url;
           link.textContent = '파일 다운로드';
           link.target = '_blank';
           buttonRow.appendChild(link);
         }
-        card.appendChild(title);
+        card.appendChild(head);
         card.appendChild(meta);
         card.appendChild(buttonRow);
         historyRoot.appendChild(card);
       });
     }
 
-    function renderMetadata(metadata) {
-      resultJson.textContent = JSON.stringify(metadata, null, 2);
-      if (metadata.output?.download_url) {
-        addDownloadLink(metadata.output.download_url, metadata.output.file_name || 'masked-result');
+    async function inspectJob(jobId) {
+      try {
+        setBusy(true);
+        resetResult();
+        await waitForCompletion(jobId);
+      } catch (error) {
+        showError(error);
+      } finally {
+        setBusy(false);
       }
     }
 
-    function addDownloadLink(url, filename) {
+    function renderMetadata(metadata) {
+      lastMetadata = metadata;
+      resultRoot.hidden = false;
+      resultJson.textContent = JSON.stringify(metadata, null, 2);
+      renderSummary(metadata);
+      if (metadata.output?.download_url) {
+        addDownloadLink(metadata.output.download_url, metadata.output.file_name || 'masked-result', false);
+      }
+    }
+
+    function renderSummary(metadata) {
+      summaryCard.innerHTML = '';
+
+      const head = document.createElement('div');
+      head.className = 'summary-head';
+      head.appendChild(statusBadge(metadata.status));
+      const title = document.createElement('strong');
+      title.textContent = metadata.input?.file_name || metadata.request_id || '결과';
+      head.appendChild(title);
+      if (metadata.job_id) {
+        const id = document.createElement('span');
+        id.className = 'muted';
+        id.textContent = metadata.job_id;
+        head.appendChild(id);
+      }
+      summaryCard.appendChild(head);
+
+      const regions = metadata.mask_policy?.applied_regions;
+      const fields = metadata.pii_summary?.length ?? 0;
+      const engine = metadata.engine || {};
+      const stats = [
+        { label: '검출 필드', value: `${fields}개` },
+        { label: '마스킹 영역', value: regions === undefined ? '-' : `${regions}곳`, warn: metadata.status === 'completed' && regions === 0 },
+        { label: '페이지', value: metadata.input?.pages ? `${metadata.input.pages}` : '-' },
+        { label: '모델 / 스키마', value: [engine.model, engine.schema].filter(Boolean).join(' / ') || '-' },
+        { label: '추론 시간', value: engine.duration_ms !== undefined ? `${engine.duration_ms} ms` : '-' },
+        { label: '업스트림 상태', value: engine.upstream_status ? `HTTP ${engine.upstream_status}` : '-' },
+      ];
+      const statRow = document.createElement('div');
+      statRow.className = 'stats';
+      stats.forEach((stat) => {
+        const box = document.createElement('div');
+        box.className = `stat${stat.warn ? ' warn' : ''}`;
+        const label = document.createElement('span');
+        label.className = 'label';
+        label.textContent = stat.label;
+        const value = document.createElement('span');
+        value.className = 'value';
+        value.textContent = stat.value;
+        box.appendChild(label);
+        box.appendChild(value);
+        statRow.appendChild(box);
+      });
+      summaryCard.appendChild(statRow);
+
+      const rules = metadata.mask_policy?.applied_rules || [];
+      if (rules.length) {
+        const ruleRow = document.createElement('div');
+        ruleRow.className = 'pill-row';
+        rules.forEach((rule) => {
+          const pill = document.createElement('span');
+          pill.className = 'pill rule';
+          pill.textContent = rule;
+          ruleRow.appendChild(pill);
+        });
+        summaryCard.appendChild(ruleRow);
+      }
+
+      if (metadata.error) {
+        const errorBox = document.createElement('div');
+        errorBox.className = 'status error';
+        errorBox.appendChild(errorContent(metadata.error));
+        summaryCard.appendChild(errorBox);
+      }
+
+      const summary = metadata.pii_summary || [];
+      if (summary.length) {
+        summaryCard.appendChild(buildSummaryTable(summary));
+      }
+    }
+
+    function buildSummaryTable(items) {
+      const wrap = document.createElement('div');
+      wrap.className = 'table-wrap';
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const headRow = document.createElement('tr');
+      ['필드', '마스킹 값', '규칙', '페이지', '신뢰도'].forEach((text) => {
+        const th = document.createElement('th');
+        th.textContent = text;
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+      const tbody = document.createElement('tbody');
+      items.forEach((item) => {
+        const row = document.createElement('tr');
+        const cells = [
+          { text: item.key || '-', mono: false },
+          { text: item.masked_value || '-', mono: true },
+          { text: item.rule_label || item.rule_name || '-', mono: false },
+          { text: item.page ? String(item.page) : '-', mono: false },
+          { text: typeof item.confidence === 'number' ? `${(item.confidence * 100).toFixed(1)}%` : '-', mono: false },
+        ];
+        cells.forEach((cell) => {
+          const td = document.createElement('td');
+          if (cell.mono) {
+            td.className = 'mono';
+          }
+          td.textContent = cell.text;
+          row.appendChild(td);
+        });
+        tbody.appendChild(row);
+      });
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      return wrap;
+    }
+
+    // renderPreview shows the upload next to the masked result so the effect of the
+    // mask can be judged at a glance. Images are shown inline; PDFs use the
+    // browser's own viewer.
+    function renderPreview(metadata, resultURL) {
+      previewRoot.innerHTML = '';
+      if (!resultURL) {
+        return;
+      }
+      const mime = normalizeMime(metadata.output?.mime_type || '');
+      const isImage = mime.startsWith('image/');
+      const isPDF = mime === 'application/pdf';
+      if (!isImage && !isPDF) {
+        return;
+      }
+      const grid = document.createElement('div');
+      grid.className = 'preview-grid';
+
+      const originalMatches = selectedFile && selectedFile.name === metadata.input?.file_name && selectedFile.size === metadata.input?.size;
+      if (originalMatches) {
+        grid.appendChild(previewBox('원본', trackObjectURL(URL.createObjectURL(selectedFile)), isImage));
+      }
+      grid.appendChild(previewBox(`마스킹 결과 (${metadata.mask_policy?.applied_regions ?? 0}곳)`, resultURL, isImage));
+      previewRoot.appendChild(grid);
+    }
+
+    function previewBox(caption, url, isImage) {
+      const box = document.createElement('div');
+      box.className = 'preview';
+      const label = document.createElement('span');
+      label.className = 'caption';
+      label.textContent = caption;
+      box.appendChild(label);
+      if (isImage) {
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = caption;
+        img.loading = 'lazy';
+        box.appendChild(img);
+      } else {
+        const frame = document.createElement('iframe');
+        frame.src = url;
+        frame.title = caption;
+        box.appendChild(frame);
+      }
+      return box;
+    }
+
+    function addDownloadLink(url, filename, isBlob) {
       if (!url) {
         return;
       }
@@ -525,7 +1121,11 @@
       const link = document.createElement('a');
       link.className = 'download-link';
       link.href = url;
-      link.target = '_blank';
+      if (isBlob) {
+        link.download = filename;
+      } else {
+        link.target = '_blank';
+      }
       link.textContent = `결과 다운로드: ${filename}`;
       downloadActions.appendChild(link);
     }
@@ -534,16 +1134,117 @@
       downloadActions.innerHTML = '';
     }
 
+    function resetResult() {
+      lastMetadata = null;
+      resultRoot.hidden = true;
+      summaryCard.innerHTML = '';
+      previewRoot.innerHTML = '';
+      resultJson.textContent = '';
+      clearDownloads();
+      objectURLs.forEach((url) => URL.revokeObjectURL(url));
+      objectURLs = [];
+    }
+
+    function trackObjectURL(url) {
+      objectURLs.push(url);
+      return url;
+    }
+
+    async function copyMetadata() {
+      if (!lastMetadata) {
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(lastMetadata, null, 2));
+        copyJsonButton.textContent = '복사됨';
+      } catch (error) {
+        copyJsonButton.textContent = '복사 실패';
+      }
+      setTimeout(() => { copyJsonButton.textContent = '복사'; }, 1500);
+    }
+
+    function statusBadge(status) {
+      const badge = document.createElement('span');
+      const value = (status || 'unknown').toLowerCase();
+      badge.className = `badge ${value}`;
+      badge.textContent = value;
+      return badge;
+    }
+
     function setBusy(isBusy) {
       processNowButton.disabled = isBusy;
+      processSyncButton.disabled = isBusy;
       createJobButton.disabled = isBusy;
       refreshHistoryButton.disabled = isBusy;
       chooseFileButton.disabled = isBusy;
     }
 
-    function setStatus(message, tone) {
+    function setStatus(message, tone, detail) {
       statusBox.textContent = message;
-      statusBox.className = `status${tone === 'ok' ? ' ok' : tone === 'error' ? ' error' : ''}`;
+      if (detail) {
+        const span = document.createElement('span');
+        span.className = 'detail';
+        span.textContent = detail;
+        statusBox.appendChild(span);
+      }
+      statusBox.className = `status${tone === 'ok' ? ' ok' : tone === 'error' ? ' error' : tone === 'warn' ? ' warn' : ''}`;
+    }
+
+    // showError renders an API error with its code and detail, so a failure such as
+    // upstream_payload_unrecognized explains itself instead of showing one line.
+    function showError(error) {
+      const apiError = error?.apiError;
+      statusBox.className = 'status error';
+      statusBox.innerHTML = '';
+      if (apiError) {
+        statusBox.appendChild(errorContent(apiError, error.httpStatus));
+        return;
+      }
+      statusBox.textContent = error?.message || '요청 처리 중 오류가 발생했습니다.';
+    }
+
+    function errorContent(apiError, httpStatus) {
+      const fragment = document.createDocumentFragment();
+      const headline = document.createElement('span');
+      headline.textContent = apiError.message || '요청 처리 중 오류가 발생했습니다.';
+      fragment.appendChild(headline);
+      const meta = document.createElement('span');
+      meta.className = 'detail';
+      const code = document.createElement('span');
+      code.className = 'code';
+      code.textContent = apiError.code || 'error';
+      meta.appendChild(code);
+      const bits = [];
+      if (httpStatus) {
+        bits.push(`HTTP ${httpStatus}`);
+      }
+      bits.push(apiError.retryable ? '재시도 가능' : '재시도해도 같은 결과');
+      meta.appendChild(document.createTextNode(` · ${bits.join(' · ')}`));
+      fragment.appendChild(meta);
+      if (apiError.detail) {
+        const detail = document.createElement('span');
+        detail.className = 'detail';
+        detail.textContent = apiError.detail;
+        fragment.appendChild(detail);
+      }
+      return fragment;
+    }
+
+    // errorFromPayload builds an Error that keeps the structured API error, whether
+    // it came wrapped as {"error": {...}} or inside a failed job's metadata.
+    function errorFromPayload(payload, httpStatus) {
+      const apiError = payload?.error && typeof payload.error === 'object' ? payload.error : null;
+      const error = new Error(extractError(payload));
+      if (apiError) {
+        error.apiError = apiError;
+      }
+      if (httpStatus) {
+        error.httpStatus = httpStatus;
+      }
+      if (payload && payload.status && payload.request_id) {
+        renderMetadata(payload);
+      }
+      return error;
     }
 
     function formatBytes(bytes) {

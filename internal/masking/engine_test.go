@@ -107,6 +107,22 @@ func TestParsePayloadRejectsTruncatedBody(t *testing.T) {
 	}
 }
 
+func TestFieldEntriesTakeThePageFromTheBoundingBox(t *testing.T) {
+	t.Parallel()
+
+	payload := map[string]any{"fields": []any{map[string]any{
+		"key":   "개인정보.이름",
+		"value": "홍길동",
+		"boundingBoxes": []any{map[string]any{"page": 3, "vertices": []any{
+			map[string]any{"x": 1, "y": 1}, map[string]any{"x": 5, "y": 1}, map[string]any{"x": 5, "y": 5}, map[string]any{"x": 1, "y": 5},
+		}}},
+	}}}
+	entries := BuildFieldEntries(payload)
+	if len(entries) != 1 || entries[0].PageNumber != 3 {
+		t.Fatalf("expected page 3 from the bounding box, got %#v", entries)
+	}
+}
+
 func TestContainsGeometry(t *testing.T) {
 	t.Parallel()
 
