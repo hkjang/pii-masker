@@ -21,8 +21,12 @@ type PIISummaryItem struct {
 }
 
 type MaskPolicy struct {
-	Mode           string   `json:"mode"`
-	AppliedRules   []string `json:"applied_rules"`
+	Mode         string   `json:"mode"`
+	AppliedRules []string `json:"applied_rules"`
+	// AppliedRegions counts the boxes drawn over the output. A completed result
+	// with zero regions means the endpoint reported no PII, and the file is the
+	// unchanged upload.
+	AppliedRegions int      `json:"applied_regions"`
 	SupportedRules []string `json:"supported_rules,omitempty"`
 }
 

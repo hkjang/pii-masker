@@ -183,6 +183,99 @@ func TestAsyncPDFJobFlow(t *testing.T) {
 	}
 }
 
+// A 200 from the inference endpoint that carries nothing the masker understands is
+// reported as an upstream failure, so no client ever downloads the unmasked upload
+// under a success status.
+func TestMaskReportsUninterpretableUpstreamResponseAsBadGateway(t *testing.T) {
+	t.Parallel()
+
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"이름\":\"홍길동\"}"}}]}`))
+	})
+	serverURL, _ := startAppServerWithUpstream(t, upstream, nil)
+
+	requestBody, contentType := buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 400, 200), nil)
+	response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusBadGateway {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("expected 502, got %d: %s", response.StatusCode, string(body))
+	}
+	if !strings.HasPrefix(response.Header.Get("Content-Type"), "application/json") {
+		t.Fatalf("expected a JSON error body, got %q", response.Header.Get("Content-Type"))
+	}
+	var metadata core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+		t.Fatalf("decode error metadata: %v", err)
+	}
+	if metadata.Status != "failed" || metadata.Error == nil || metadata.Error.Code != "upstream_payload_unrecognized" {
+		t.Fatalf("expected upstream_payload_unrecognized failure, got %#v", metadata)
+	}
+}
+
+// The same response on the async path must leave the job failed with no result file.
+func TestAsyncJobFailsWhenUpstreamResponseIsNotUnderstood(t *testing.T) {
+	t.Parallel()
+
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{}"}}]}`))
+	})
+	serverURL, _ := startAppServerWithUpstream(t, upstream, nil)
+
+	requestBody, contentType := buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 400, 200), nil)
+	response, err := http.Post(serverURL+"/v1/jobs", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/jobs: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	var created core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
+		t.Fatalf("decode job metadata: %v", err)
+	}
+
+	var job core.ProcessMetadata
+	for range 40 {
+		time.Sleep(50 * time.Millisecond)
+		jobResponse, err := http.Get(serverURL + "/v1/jobs/" + url.PathEscape(created.JobID))
+		if err != nil {
+			t.Fatalf("get job: %v", err)
+		}
+		err = json.NewDecoder(jobResponse.Body).Decode(&job)
+		jobResponse.Body.Close()
+		if err != nil {
+			t.Fatalf("decode job metadata: %v", err)
+		}
+		if job.Status == "completed" || job.Status == "failed" {
+			break
+		}
+	}
+	if job.Status != "failed" || job.Error == nil || job.Error.Code != "upstream_payload_unrecognized" {
+		t.Fatalf("expected a failed job with upstream_payload_unrecognized, got %#v", job)
+	}
+	if job.Output.DownloadURL != "" {
+		t.Fatalf("expected no download url on a failed job, got %q", job.Output.DownloadURL)
+	}
+
+	resultResponse, err := http.Get(serverURL + "/v1/jobs/" + url.PathEscape(created.JobID) + "/result")
+	if err != nil {
+		t.Fatalf("get job result: %v", err)
+	}
+	defer resultResponse.Body.Close()
+	if resultResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for the result of a failed job, got %d", resultResponse.StatusCode)
+	}
+}
+
 func TestTestConnectionEndpoint(t *testing.T) {
 	t.Parallel()
 
@@ -226,6 +319,9 @@ func TestIndexPageIsServed(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "PII Masker API Playground") {
 		t.Fatalf("unexpected index body: %s", string(body))
+	}
+	if got := response.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("expected the page to be revalidated on every load, got Cache-Control %q", got)
 	}
 }
 

@@ -73,8 +73,13 @@ type ParseResponse struct {
 }
 
 type DocumentResult struct {
-	Attachment    document.Attachment
-	Response      ParseResponse
+	Attachment document.Attachment
+	Response   ParseResponse
+	// RawBody is the complete response body as the endpoint sent it. The masking
+	// engine reads its fields from here when the response is not wrapped in a
+	// "result" envelope; ResponseDebug.Body is a truncated, pretty printed copy
+	// meant for humans and must never be parsed.
+	RawBody       []byte
 	ResponseDebug ResponseDebug
 	RequestDebug  RequestDebug
 }
@@ -321,6 +326,7 @@ func (c *Client) performParseRequest(ctx context.Context, originalAttachment doc
 	return DocumentResult{
 		Attachment:    originalAttachment,
 		Response:      parsed,
+		RawBody:       responseBody,
 		ResponseDebug: buildResponseDebug(response.StatusCode, response.Header, responseBody, nil),
 		RequestDebug:  requestDebug,
 	}, response.StatusCode, nil
