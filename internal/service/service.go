@@ -97,6 +97,18 @@ func (e *InvalidInputError) Unwrap() error {
 	return e.Err
 }
 
+// unrecognizedPayloadError marks a 200 response from the inference endpoint whose
+// body could not be turned into fields to mask. It is reported as an upstream
+// failure, never as a clean document, because the two are indistinguishable from
+// the downloaded file alone.
+type unrecognizedPayloadError struct {
+	detail string
+}
+
+func (e *unrecognizedPayloadError) Error() string {
+	return "upstream response could not be interpreted as PII fields: " + e.detail
+}
+
 func New(cfg config.Config, client *upstage.Client, jobStore *jobs.Store) *Service {
 	slots := cfg.Limits.MaxConcurrentJobs
 	if slots <= 0 {
@@ -516,7 +528,7 @@ func (s *Service) process(ctx context.Context, requestID string, input ProcessIn
 		return metadata, nil, err
 	}
 
-	payload := masking.ParsePayload(result.Response.Result, result.ResponseDebug.Body)
+	payload := masking.ParsePayload(result.Response.Result, result.RawBody)
 	pageSizes := masking.ExtractPageSizes(payload)
 	regions := masking.CollectMaskRegions(payload)
 	fieldEntries := masking.BuildFieldEntries(payload)
@@ -537,6 +549,30 @@ func (s *Service) process(ctx context.Context, requestID string, input ProcessIn
 		}
 	}
 
+	// Everything below fails closed. The endpoint answered 200, but the document is
+	// only handed back once every field it reported has actually been drawn over;
+	// otherwise the caller would download an unmasked file under a success status.
+	if payload == nil {
+		err = &unrecognizedPayloadError{detail: "응답 본문을 JSON 엔티티 목록으로 해석하지 못했습니다."}
+		metadata.Error = mapError(err)
+		return metadata, nil, err
+	}
+	if len(summary) == 0 {
+		// Nothing to mask is only believable from a response in a known schema. A
+		// body in some other shape, or one that located items whose values could
+		// not be read, says the endpoint or its output format is not the one this
+		// service was built for.
+		switch {
+		case masking.ContainsGeometry(payload):
+			err = &unrecognizedPayloadError{detail: "응답에 좌표 정보는 있지만 마스킹할 필드 값을 하나도 읽어내지 못했습니다."}
+		case detectSchema(payload) == "":
+			err = &unrecognizedPayloadError{detail: "응답에 fields/entities 같은 PII 필드 목록이 없습니다. 엔드포인트 URL, model, schema 설정을 확인하세요."}
+		}
+		if err != nil {
+			metadata.Error = mapError(err)
+			return metadata, nil, err
+		}
+	}
 	if len(summary) > 0 && len(regions) == 0 {
 		err = fmt.Errorf("PII fields were detected but the upstream response did not contain usable bounding boxes for partial visual masking")
 		metadata.Error = mapError(err)
@@ -563,6 +599,7 @@ func (s *Service) process(ctx context.Context, requestID string, input ProcessIn
 			return metadata, nil, err
 		}
 	}
+	metadata.MaskPolicy.AppliedRegions = len(regions)
 
 	metadata.Status = "completed"
 	metadata.Output = core.FileDescriptor{
@@ -683,6 +720,15 @@ func mapError(err error) *core.APIError {
 			Message:   callErr.Summary,
 			Detail:    callErr.Detail,
 			Retryable: callErr.Retryable,
+		}
+	}
+	var unrecognized *unrecognizedPayloadError
+	if errors.As(err, &unrecognized) {
+		return &core.APIError{
+			Code:      "upstream_payload_unrecognized",
+			Message:   "PII API 응답을 해석하지 못해 마스킹을 완료할 수 없습니다.",
+			Detail:    unrecognized.detail,
+			Retryable: false,
 		}
 	}
 	return &core.APIError{

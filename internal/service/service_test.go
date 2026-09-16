@@ -82,6 +82,173 @@ func TestProcessSyncFailsClosedWhenPIIHasNoBoundingBoxes(t *testing.T) {
 	}
 }
 
+// A real endpoint answers with the fields at the top level and, for a document with
+// many of them, a body far larger than the truncated debug copy. That copy used to
+// be the only fallback the parser saw, so every field was lost and the upload came
+// back unchanged under a completed status.
+func TestProcessSyncMasksLargeTopLevelResponses(t *testing.T) {
+	t.Parallel()
+
+	const fieldCount = 120
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fields := make([]any, 0, fieldCount)
+		for index := range fieldCount {
+			y := 2 + index*2
+			fields = append(fields, map[string]any{
+				"key":        "개인정보.휴대폰번호",
+				"value":      "010-1234-5678",
+				"confidence": 0.9,
+				"boundingBoxes": []any{map[string]any{"page": 1, "vertices": []any{
+					map[string]any{"x": 20, "y": y}, map[string]any{"x": 280, "y": y},
+					map[string]any{"x": 280, "y": y + 2}, map[string]any{"x": 20, "y": y + 2},
+				}}},
+			})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"apiVersion":   "1.1",
+			"documentType": "pii",
+			"fields":       fields,
+			"metadata":     map[string]any{"pages": []any{map[string]any{"page": 1, "width": 300, "height": 300}}},
+		})
+	}))
+	defer upstream.Close()
+
+	svc := newUpstreamService(t, upstream.URL)
+	input := ProcessInput{
+		Attachment: document.NewAttachment("sample.png", "image/png", createWhitePNG(t, 300, 300)),
+	}
+
+	metadata, masked, err := svc.ProcessSync(context.Background(), input)
+	if err != nil {
+		t.Fatalf("ProcessSync: %v", err)
+	}
+	if metadata.Status != "completed" {
+		t.Fatalf("expected completed, got %#v", metadata)
+	}
+	if metadata.MaskPolicy.AppliedRegions != fieldCount {
+		t.Fatalf("expected %d applied regions, got %d", fieldCount, metadata.MaskPolicy.AppliedRegions)
+	}
+	img, _, err := image.Decode(bytes.NewReader(masked))
+	if err != nil {
+		t.Fatalf("decode masked png: %v", err)
+	}
+	// "010-1234-5678" masks its last four digits, the right third of the box.
+	if r, g, b, _ := img.At(270, 3).RGBA(); r != 0 || g != 0 || b != 0 {
+		t.Fatalf("expected the trailing digits to be blacked out, got %d %d %d", r, g, b)
+	}
+	if r, g, b, _ := img.At(40, 3).RGBA(); r != 0xffff || g != 0xffff || b != 0xffff {
+		t.Fatalf("expected the leading digits to stay visible, got %d %d %d", r, g, b)
+	}
+}
+
+// A 200 whose body the parser cannot turn into fields is an upstream failure. It
+// must not be mistaken for a document without PII and handed back unmasked.
+func TestProcessSyncFailsClosedWhenTheResponseIsNotUnderstood(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]any{
+		"chat completion body": map[string]any{
+			"id":      "chatcmpl-1",
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "{\"name\":\"홍길동\"}"}}},
+		},
+		"located items without readable values": map[string]any{
+			"fields": []any{map[string]any{
+				"id":            7,
+				"extracted":     map[string]any{"string": "홍길동"},
+				"boundingBoxes": []any{map[string]any{"page": 1, "vertices": []any{map[string]any{"x": 1, "y": 1}, map[string]any{"x": 5, "y": 1}, map[string]any{"x": 5, "y": 5}, map[string]any{"x": 1, "y": 5}}}},
+			}},
+		},
+	}
+	for name, body := range cases {
+		body := body
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(body)
+			}))
+			defer upstream.Close()
+
+			svc := newUpstreamService(t, upstream.URL)
+			input := ProcessInput{
+				Attachment: document.NewAttachment("sample.png", "image/png", createWhitePNG(t, 300, 120)),
+			}
+
+			metadata, masked, err := svc.ProcessSync(context.Background(), input)
+			if err == nil {
+				t.Fatalf("expected processing to fail")
+			}
+			if masked != nil {
+				t.Fatalf("expected no document to be returned")
+			}
+			if metadata == nil || metadata.Error == nil || metadata.Error.Code != "upstream_payload_unrecognized" {
+				t.Fatalf("expected upstream_payload_unrecognized, got %#v", metadata)
+			}
+			if metadata.Status != "failed" {
+				t.Fatalf("expected failed status, got %q", metadata.Status)
+			}
+		})
+	}
+}
+
+// An endpoint that finds nothing to mask is still a success: the file comes back
+// unchanged, and the metadata says so through a zero region count.
+func TestProcessSyncReturnsTheUploadWhenNoPIIIsReported(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"apiVersion": "1.1",
+			"fields":     []any{},
+			"metadata":   map[string]any{"pages": []any{map[string]any{"page": 1, "width": 300, "height": 120}}},
+		})
+	}))
+	defer upstream.Close()
+
+	svc := newUpstreamService(t, upstream.URL)
+	content := createWhitePNG(t, 300, 120)
+	input := ProcessInput{Attachment: document.NewAttachment("sample.png", "image/png", content)}
+
+	metadata, masked, err := svc.ProcessSync(context.Background(), input)
+	if err != nil {
+		t.Fatalf("ProcessSync: %v", err)
+	}
+	if metadata.Status != "completed" || metadata.MaskPolicy.AppliedRegions != 0 || len(metadata.PIISummary) != 0 {
+		t.Fatalf("expected a completed result with nothing masked, got %#v", metadata)
+	}
+	if !bytes.Equal(masked, content) {
+		t.Fatalf("expected the upload to be returned unchanged")
+	}
+}
+
+func newUpstreamService(t *testing.T, upstreamURL string) *Service {
+	t.Helper()
+
+	cfg := config.Config{
+		Upstage: config.UpstageConfig{
+			BaseURL:    upstreamURL,
+			Timeout:    5 * time.Second,
+			Model:      "pii",
+			Lang:       "ko",
+			Schema:     "oac",
+			AllowHosts: []string{"127.0.0.1", "localhost"},
+		},
+		Limits: config.LimitsConfig{
+			MaxFileSizeBytes: 5 * 1024 * 1024,
+			MaxPages:         5,
+			SupportedMIMEs:   []string{"image/png", "image/jpeg"},
+		},
+		Storage: config.StorageConfig{
+			RootDir: t.TempDir(),
+		},
+	}
+	jobStore, err := jobs.New(cfg.Storage.RootDir)
+	if err != nil {
+		t.Fatalf("jobs.New: %v", err)
+	}
+	return New(cfg, upstage.NewClient(cfg.Upstage), jobStore)
+}
+
 func TestLoadJobInputReadsStoredUpload(t *testing.T) {
 	t.Parallel()
 

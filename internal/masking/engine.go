@@ -124,7 +124,15 @@ func collectMaskRegionsRecursive(value any, regions *[]Region) {
 				if pageNumber == 0 {
 					pageNumber = 1
 				}
-				subRegions := buildSubRegionsFromBBox(bbox.Polygon, fieldValue, spans)
+				// A value that comes with several boxes is wrapped over lines or
+				// repeated on the document, and nothing says which runes each box
+				// holds. Spreading the masked spans over every box would blank
+				// the wrong characters and leave the sensitive ones readable, so
+				// every box is covered in full instead.
+				var subRegions []Region
+				if len(bboxes) == 1 {
+					subRegions = buildSubRegionsFromBBox(bbox.Polygon, fieldValue, spans)
+				}
 				if len(subRegions) == 0 {
 					subRegions = []Region{{PageNumber: pageNumber, Polygon: bbox.Polygon}}
 				}
@@ -374,6 +382,83 @@ func polygonBounds(poly [4][2]float64) (minX, minY, maxX, maxY float64) {
 	return
 }
 
+// placedRegion is a mask rectangle in the target page's own units, with the
+// origin at the top left corner.
+type placedRegion struct {
+	minX, minY, maxX, maxY float64
+}
+
+// minPlacedSize is the smallest box, in target units, still considered to land on
+// the page. Anything thinner was clipped away or never overlapped the page.
+const minPlacedSize = 0.5
+
+// placeRegion maps a region reported by the inference endpoint onto a page of the
+// given size. Coordinates come in three flavours: normalized to the page (0..1),
+// pixels of the page image the endpoint rendered (whose size it reports alongside),
+// or the page's own units when no size is reported. A region that would end up off
+// the page is an error rather than a stamp nobody can see: it means the units were
+// misread, and returning the document as "masked" would leak the field it covers.
+func placeRegion(region Region, apiSize PageSize, hasAPISize bool, target PageSize) (placedRegion, error) {
+	if target.Width <= 0 || target.Height <= 0 {
+		return placedRegion{}, fmt.Errorf("page %d has no usable dimensions", region.PageNumber)
+	}
+	minX, minY, maxX, maxY := polygonBounds(region.Polygon)
+	if math.IsNaN(minX+minY+maxX+maxY) || math.IsInf(minX+minY+maxX+maxY, 0) {
+		return placedRegion{}, fmt.Errorf("mask region on page %d has invalid coordinates", region.PageNumber)
+	}
+
+	scaleX, scaleY := 1.0, 1.0
+	switch {
+	case isNormalizedBox(minX, minY, maxX, maxY):
+		scaleX, scaleY = target.Width, target.Height
+	case hasAPISize && apiSize.Width > 0 && apiSize.Height > 0:
+		scaleX = target.Width / apiSize.Width
+		scaleY = target.Height / apiSize.Height
+	default:
+		// Without a reported page size the coordinates are taken as page units.
+		// If they overflow the page they were pixels of some unknown rendering,
+		// and scaling them cannot be guessed.
+		if maxX > target.Width*(1+overflowTolerance) || maxY > target.Height*(1+overflowTolerance) {
+			return placedRegion{}, fmt.Errorf(
+				"mask region on page %d spans (%.1f, %.1f)-(%.1f, %.1f) but the page is %.1f x %.1f and the upstream response reported no page size",
+				region.PageNumber, minX, minY, maxX, maxY, target.Width, target.Height)
+		}
+	}
+
+	placed := placedRegion{
+		minX: math.Max(minX*scaleX, 0),
+		minY: math.Max(minY*scaleY, 0),
+		maxX: math.Min(maxX*scaleX, target.Width),
+		maxY: math.Min(maxY*scaleY, target.Height),
+	}
+	if placed.maxX-placed.minX < minPlacedSize || placed.maxY-placed.minY < minPlacedSize {
+		return placedRegion{}, fmt.Errorf(
+			"mask region on page %d spans (%.1f, %.1f)-(%.1f, %.1f) and does not land on the %.1f x %.1f page",
+			region.PageNumber, minX, minY, maxX, maxY, target.Width, target.Height)
+	}
+	// A box that shrank to a hairline keeps at least one unit so it still shows.
+	if placed.maxX-placed.minX < 1 {
+		placed.maxX = math.Min(placed.minX+1, target.Width)
+		placed.minX = placed.maxX - 1
+	}
+	if placed.maxY-placed.minY < 1 {
+		placed.maxY = math.Min(placed.minY+1, target.Height)
+		placed.minY = placed.maxY - 1
+	}
+	return placed, nil
+}
+
+// overflowTolerance is how far past the page edge an unscaled coordinate may reach
+// before it is treated as being in the wrong units rather than a slightly loose box.
+const overflowTolerance = 0.05
+
+// isNormalizedBox reports whether every coordinate lies within the unit square, the
+// convention of endpoints that report positions as fractions of the page.
+func isNormalizedBox(minX, minY, maxX, maxY float64) bool {
+	const slack = 1e-6
+	return minX >= -slack && minY >= -slack && maxX <= 1+slack && maxY <= 1+slack && (maxX > 0 || maxY > 0)
+}
+
 func MaskImageFile(content []byte, mimeType string, regions []Region, pageSizes map[int]PageSize) ([]byte, error) {
 	img, format, err := document.DecodeImage(content)
 	if err != nil {
@@ -381,27 +466,28 @@ func MaskImageFile(content []byte, mimeType string, regions []Region, pageSizes 
 	}
 
 	bounds := img.Bounds()
-	imgW := float64(bounds.Dx())
-	imgH := float64(bounds.Dy())
+	target := PageSize{Width: float64(bounds.Dx()), Height: float64(bounds.Dy())}
+	apiSize, hasAPISize := pageSizes[1]
 
-	scaleX, scaleY := 1.0, 1.0
-	if ps, ok := pageSizes[1]; ok && ps.Width > 0 && ps.Height > 0 {
-		scaleX = imgW / ps.Width
-		scaleY = imgH / ps.Height
+	rects := make([]image.Rectangle, 0, len(regions))
+	for _, region := range regions {
+		placed, err := placeRegion(region, apiSize, hasAPISize, target)
+		if err != nil {
+			return nil, err
+		}
+		rects = append(rects, image.Rect(
+			bounds.Min.X+int(math.Floor(placed.minX)),
+			bounds.Min.Y+int(math.Floor(placed.minY)),
+			bounds.Min.X+int(math.Ceil(placed.maxX)),
+			bounds.Min.Y+int(math.Ceil(placed.maxY)),
+		))
 	}
 
 	dst := image.NewRGBA(bounds)
 	draw.Draw(dst, bounds, img, bounds.Min, draw.Src)
 
 	black := image.NewUniform(color.Black)
-	for _, region := range regions {
-		minX, minY, maxX, maxY := polygonBounds(region.Polygon)
-		rect := image.Rect(
-			int(math.Floor(minX*scaleX)),
-			int(math.Floor(minY*scaleY)),
-			int(math.Ceil(maxX*scaleX)),
-			int(math.Ceil(maxY*scaleY)),
-		)
+	for _, rect := range rects {
 		draw.Draw(dst, rect, black, image.Point{}, draw.Src)
 	}
 
@@ -437,46 +523,32 @@ func maskPDFFileInternal(content []byte, regions []Region, pageSizes map[int]Pag
 		return nil, fmt.Errorf("failed to read PDF page dimensions: %w", err)
 	}
 
-	byPage := map[int][]Region{}
-	for _, region := range regions {
-		byPage[region.PageNumber] = append(byPage[region.PageNumber], region)
-	}
-
 	wmMap := map[int][]*pdfmodel.Watermark{}
-	for pageNumber, pageRegions := range byPage {
+	for _, region := range regions {
+		pageNumber := region.PageNumber
 		if pageNumber < 1 || pageNumber > len(pdfPageDims) {
-			continue
+			return nil, fmt.Errorf("mask region refers to page %d but the document has %d page(s)", pageNumber, len(pdfPageDims))
 		}
-		pdfW := pdfPageDims[pageNumber-1].Width
-		pdfH := pdfPageDims[pageNumber-1].Height
+		target := PageSize{Width: pdfPageDims[pageNumber-1].Width, Height: pdfPageDims[pageNumber-1].Height}
+		apiSize, hasAPISize := pageSizes[pageNumber]
 
-		apiW, apiH := pdfW, pdfH
-		if ps, ok := pageSizes[pageNumber]; ok && ps.Width > 0 && ps.Height > 0 {
-			apiW = ps.Width
-			apiH = ps.Height
+		placed, err := placeRegion(region, apiSize, hasAPISize, target)
+		if err != nil {
+			return nil, err
 		}
-		scaleX := pdfW / apiW
-		scaleY := pdfH / apiH
+		width := placed.maxX - placed.minX
+		height := placed.maxY - placed.minY
 
-		for _, region := range pageRegions {
-			minX, minY, maxX, maxY := polygonBounds(region.Polygon)
-			x := minX * scaleX
-			y := minY * scaleY
-			width := (maxX - minX) * scaleX
-			height := (maxY - minY) * scaleY
-			if width < 1 || height < 1 {
-				continue
-			}
-
-			regionImg := createBlackPNG(int(math.Ceil(width)), int(math.Ceil(height)))
-			pdfY := pdfH - y - height
-			desc := fmt.Sprintf("position:bl, offset:%.1f %.1f, scalefactor:1.0 abs, rotation:0, opacity:1", x, pdfY)
-			wm, wmErr := api.ImageWatermarkForReader(bytes.NewReader(regionImg), desc, true, false, types.POINTS)
-			if wmErr != nil {
-				return nil, fmt.Errorf("pdfcpu watermark create error on page %d: %w", pageNumber, wmErr)
-			}
-			wmMap[pageNumber] = append(wmMap[pageNumber], wm)
+		// The stamp image is drawn at one point per pixel, so its size is rounded
+		// up and the box grows outward rather than leaving a sliver uncovered.
+		regionImg := createBlackPNG(int(math.Ceil(width)), int(math.Ceil(height)))
+		pdfY := target.Height - placed.minY - math.Ceil(height)
+		desc := fmt.Sprintf("position:bl, offset:%.2f %.2f, scalefactor:1.0 abs, rotation:0, opacity:1", placed.minX, pdfY)
+		wm, wmErr := api.ImageWatermarkForReader(bytes.NewReader(regionImg), desc, true, false, types.POINTS)
+		if wmErr != nil {
+			return nil, fmt.Errorf("pdfcpu watermark create error on page %d: %w", pageNumber, wmErr)
 		}
+		wmMap[pageNumber] = append(wmMap[pageNumber], wm)
 	}
 
 	if len(wmMap) == 0 {
@@ -504,14 +576,42 @@ func createBlackPNG(width, height int) []byte {
 	return buf.Bytes()
 }
 
-func ParsePayload(raw json.RawMessage, debugBody string) any {
+// ParsePayload decodes the entity payload of an inference response. The "result"
+// member is preferred; a response that carries its fields at the top level is read
+// from body, which must be the complete body as received. A truncated or pretty
+// printed copy would fail to decode and silently report a document with no PII.
+func ParsePayload(raw json.RawMessage, body []byte) any {
 	if payload := parseJSONPayload(raw); payload != nil {
 		return unwrapPayloadEnvelope(payload)
 	}
-	if payload := parseJSONPayload([]byte(strings.TrimSpace(debugBody))); payload != nil {
+	if payload := parseJSONPayload(body); payload != nil {
 		return unwrapPayloadEnvelope(payload)
 	}
 	return nil
+}
+
+// ContainsGeometry reports whether any object in payload carries bounding box
+// style coordinates. A response that located something on the page but yielded no
+// field entry was not understood, which is different from a document without PII.
+func ContainsGeometry(payload any) bool {
+	switch typed := payload.(type) {
+	case map[string]any:
+		if hasGeometryHints(typed) {
+			return true
+		}
+		for _, nested := range typed {
+			if ContainsGeometry(nested) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if ContainsGeometry(item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func parseJSONPayload(raw []byte) any {
@@ -588,8 +688,12 @@ func extractEntityKey(value map[string]any) string {
 	return ""
 }
 
+// extractEntityValue returns the text of an entity. The value as it is printed on
+// the document comes first: masked character positions are mapped onto the
+// bounding box by rune index, so a refined form such as "01012345678" for a
+// printed "010-1234-5678" would shift the mask onto the wrong characters.
 func extractEntityValue(value map[string]any) string {
-	for _, key := range []string{"refinedValue", "value", "normalizedValue", "rawValue", "text", "content", "ocrText", "chips", "label"} {
+	for _, key := range []string{"value", "rawValue", "text", "ocrText", "content", "normalizedValue", "refinedValue", "chips", "label"} {
 		if extracted := extractFieldValue(value[key]); extracted != "" {
 			return extracted
 		}
