@@ -182,6 +182,116 @@ func TestLoadPersistsInterruptedJobs(t *testing.T) {
 	}
 }
 
+// A directory that holds an upload but no usable record is unreachable through the
+// store and would never be swept, so loading removes it along with the document.
+func TestLoadRemovesOrphanedJobDirectories(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	now := time.Now().UTC()
+	keptInput := seedJob(t, store, "kept-job", "completed", now)
+
+	jobsDir := filepath.Join(root, "jobs")
+	// The crash-between-writes case: the upload landed, job.json never did.
+	noRecord := writeOrphanDir(t, jobsDir, "no-record", nil)
+	// A record cut off mid write.
+	corruptRecord := writeOrphanDir(t, jobsDir, "corrupt-record", []byte(`{"id":"corrupt-rec`))
+	// A record that names a different job than the directory it sits in.
+	mismatched := core.JobRecord{
+		ID:       "other-job",
+		Metadata: core.ProcessMetadata{JobID: "other-job", Status: "completed", UpdatedAt: now},
+	}
+	rawMismatched, err := json.Marshal(mismatched)
+	if err != nil {
+		t.Fatalf("marshal mismatched record: %v", err)
+	}
+	mismatchedDir := writeOrphanDir(t, jobsDir, "mismatched-record", rawMismatched)
+
+	reloaded, err := New(root)
+	if err != nil {
+		t.Fatalf("New (reload): %v", err)
+	}
+
+	for _, dir := range []string{noRecord, corruptRecord, mismatchedDir} {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("expected orphaned directory %s to be removed, got %v", dir, err)
+		}
+	}
+	for _, id := range []string{"no-record", "corrupt-record", "mismatched-record", "other-job"} {
+		if _, ok, _ := reloaded.Get(id); ok {
+			t.Fatalf("expected no job %q to be loaded from an orphaned directory", id)
+		}
+	}
+
+	if _, ok, _ := reloaded.Get("kept-job"); !ok {
+		t.Fatalf("expected the intact job to be reloaded")
+	}
+	if _, err := os.Stat(keptInput); err != nil {
+		t.Fatalf("expected the intact job files to be kept: %v", err)
+	}
+}
+
+// A job whose record cannot be written leaves neither an entry nor the upload it
+// stored a moment earlier behind.
+func TestCreateRemovesTheDirectoryWhenTheRecordCannotBePersisted(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	inputPath, err := store.WriteInputFile("doomed-job", "sample.png", []byte("original"))
+	if err != nil {
+		t.Fatalf("WriteInputFile: %v", err)
+	}
+	// A directory in the record's place makes writing job.json fail.
+	jobDir := filepath.Dir(inputPath)
+	if err := os.Mkdir(filepath.Join(jobDir, "job.json"), 0o755); err != nil {
+		t.Fatalf("block job.json: %v", err)
+	}
+
+	job := &core.JobRecord{
+		ID:        "doomed-job",
+		Metadata:  core.ProcessMetadata{JobID: "doomed-job", Status: "queued", UpdatedAt: time.Now().UTC()},
+		InputPath: inputPath,
+	}
+	if err := store.Create(job); err == nil {
+		t.Fatalf("expected Create to fail when job.json cannot be written")
+	}
+
+	if _, ok, _ := store.Get("doomed-job"); ok {
+		t.Fatalf("expected the failed job to be absent from the store")
+	}
+	if _, err := os.Stat(jobDir); !os.IsNotExist(err) {
+		t.Fatalf("expected the job directory and its upload to be removed, got %v", err)
+	}
+}
+
+// writeOrphanDir creates a job directory holding an upload and, when record is not
+// nil, the given job.json bytes. It returns the directory path.
+func writeOrphanDir(t *testing.T, jobsDir, name string, record []byte) string {
+	t.Helper()
+
+	dir := filepath.Join(jobsDir, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create orphan dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "input_sample.png"), []byte("original"), 0o644); err != nil {
+		t.Fatalf("write orphan upload: %v", err)
+	}
+	if record != nil {
+		if err := os.WriteFile(filepath.Join(dir, "job.json"), record, 0o644); err != nil {
+			t.Fatalf("write orphan record: %v", err)
+		}
+	}
+	return dir
+}
+
 // seedJob stores a job with an input and an output file and returns the input path.
 func seedJob(t *testing.T, store *Store, id, status string, updatedAt time.Time) string {
 	t.Helper()
