@@ -3,6 +3,7 @@ package jobs
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,11 +33,23 @@ func New(root string) (*Store, error) {
 	return store, nil
 }
 
+// Create records a new job. The uploaded input is written to the job directory
+// before the record exists, so a record that cannot be persisted takes the
+// directory down with it: a directory without a valid job.json is unreachable
+// through the API and would otherwise keep the original document until the next
+// start removes it.
 func (s *Store) Create(job *core.JobRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.jobs[job.ID] = cloneJob(job)
-	return s.persistLocked(job.ID)
+	if err := s.persistLocked(job.ID); err != nil {
+		delete(s.jobs, job.ID)
+		if job.ID != "" {
+			_ = os.RemoveAll(filepath.Join(s.root, job.ID))
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Store) Save(job *core.JobRecord) error {
@@ -133,6 +146,12 @@ func (s *Store) writeFile(jobID, filename string, content []byte) (string, error
 // upload - the original, unmasked document - a full retention window into the
 // future, and because the transition happens on every start a service that
 // restarts more often than that would keep those files forever.
+//
+// A directory without a readable job.json, or whose record names another job, is
+// removed instead of skipped. The upload was written before the record, so a crash
+// or a full disk in between leaves exactly such a directory behind, and one that is
+// never loaded is never looked up, never listed and never reached by the retention
+// sweep, which deletes by job id. Nothing can still use the document it holds.
 func (s *Store) load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -145,15 +164,16 @@ func (s *Store) load() error {
 		if !entry.IsDir() {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(s.root, entry.Name(), "job.json"))
-		if err != nil {
-			continue
-		}
-		var job core.JobRecord
-		if err := json.Unmarshal(raw, &job); err != nil {
-			continue
-		}
 		jobDir := filepath.Join(s.root, entry.Name())
+		job, ok := readJobRecord(jobDir, entry.Name())
+		if !ok {
+			if err := os.RemoveAll(jobDir); err != nil {
+				log.Printf("failed to remove orphaned job directory %s: %v", jobDir, err)
+			} else {
+				log.Printf("removed orphaned job directory %s", jobDir)
+			}
+			continue
+		}
 		job.InputPath = firstExistingFile(jobDir, "input_")
 		job.OutputPath = firstExistingFile(jobDir, "output_")
 		interrupted := job.Metadata.Status == "queued" || job.Metadata.Status == "running"
@@ -165,7 +185,7 @@ func (s *Store) load() error {
 				Retryable: true,
 			}
 		}
-		s.jobs[job.ID] = cloneJob(&job)
+		s.jobs[job.ID] = cloneJob(job)
 		if interrupted {
 			// Best effort: a directory that cannot be written only means the next
 			// start repeats the same transition, which changes nothing.
@@ -173,6 +193,25 @@ func (s *Store) load() error {
 		}
 	}
 	return nil
+}
+
+// readJobRecord decodes the record stored in a job directory. It reports false
+// when there is no usable record: the file is missing or not valid JSON, or the
+// id inside does not match the directory, which every write path derives from the
+// id and which the retention sweep therefore would never remove.
+func readJobRecord(jobDir, expectedID string) (*core.JobRecord, bool) {
+	raw, err := os.ReadFile(filepath.Join(jobDir, "job.json"))
+	if err != nil {
+		return nil, false
+	}
+	var job core.JobRecord
+	if err := json.Unmarshal(raw, &job); err != nil {
+		return nil, false
+	}
+	if job.ID != expectedID {
+		return nil, false
+	}
+	return &job, true
 }
 
 func (s *Store) persistLocked(jobID string) error {
