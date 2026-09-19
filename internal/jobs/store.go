@@ -152,6 +152,8 @@ func (s *Store) writeFile(jobID, filename string, content []byte) (string, error
 // or a full disk in between leaves exactly such a directory behind, and one that is
 // never loaded is never looked up, never listed and never reached by the retention
 // sweep, which deletes by job id. Nothing can still use the document it holds.
+// Because a record is replaced by rename (see persistLocked), a damaged job.json
+// only arises when no record was ever completed, never from a later save.
 func (s *Store) load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -214,6 +216,23 @@ func readJobRecord(jobDir, expectedID string) (*core.JobRecord, bool) {
 	return &job, true
 }
 
+// recordTempName is where a new record is staged before it replaces job.json.
+// Nothing reads it: readJobRecord only opens job.json, and firstExistingFile only
+// matches the input_/output_ prefixes, so a leftover from a crash is neither
+// mistaken for the record nor for a document. The next persist overwrites it.
+const recordTempName = "job.json.tmp"
+
+// persistLocked writes the in-memory record to disk. The caller holds s.mu.
+//
+// The record is written to a temporary file and renamed over job.json rather than
+// written in place, because an in-place write truncates the file first and a
+// process killed between the truncate and the write (OOM kill, SIGKILL, a disk
+// that fills up) leaves an empty or cut-off record behind. load treats such a
+// record as an orphan and removes the whole directory, including a masked result
+// that was already written, so a job that died on its final save would vanish
+// with a 404 instead of showing up as interrupted and retryable. A rename either
+// replaces the file or leaves the previous record untouched. This guards against
+// the process dying, not against power loss; there is no fsync.
 func (s *Store) persistLocked(jobID string) error {
 	job, ok := s.jobs[jobID]
 	if !ok {
@@ -227,7 +246,15 @@ func (s *Store) persistLocked(jobID string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(jobDir, "job.json"), raw, 0o644)
+	tempPath := filepath.Join(jobDir, recordTempName)
+	if err := os.WriteFile(tempPath, raw, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, filepath.Join(jobDir, "job.json")); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	return nil
 }
 
 func cloneJob(job *core.JobRecord) *core.JobRecord {

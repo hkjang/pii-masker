@@ -1,9 +1,11 @@
 package jobs
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -269,6 +271,146 @@ func TestCreateRemovesTheDirectoryWhenTheRecordCannotBePersisted(t *testing.T) {
 	}
 	if _, err := os.Stat(jobDir); !os.IsNotExist(err) {
 		t.Fatalf("expected the job directory and its upload to be removed, got %v", err)
+	}
+}
+
+// The record is staged in a temporary file and moved into place, and a job
+// directory holds nothing but the record and the documents once that is done.
+func TestSaveLeavesNoTemporaryFileBehind(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	now := time.Now().UTC()
+	inputPath := seedJob(t, store, "steady-job", "queued", now)
+	jobDir := filepath.Dir(inputPath)
+
+	job, ok, err := store.Get("steady-job")
+	if err != nil || !ok {
+		t.Fatalf("expected the seeded job, ok=%v err=%v", ok, err)
+	}
+	for _, status := range []string{"running", "completed", "completed"} {
+		job.Metadata.Status = status
+		job.Metadata.UpdatedAt = time.Now().UTC()
+		if err := store.Save(job); err != nil {
+			t.Fatalf("Save(%s): %v", status, err)
+		}
+	}
+
+	entries, err := os.ReadDir(jobDir)
+	if err != nil {
+		t.Fatalf("read job dir: %v", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "job.json" || strings.HasPrefix(name, "input_") || strings.HasPrefix(name, "output_") {
+			continue
+		}
+		t.Fatalf("unexpected entry %q left in the job directory", name)
+	}
+	stored, ok := readJobRecord(jobDir, "steady-job")
+	if !ok || stored.Metadata.Status != "completed" {
+		t.Fatalf("expected the last saved record on disk, ok=%v record=%#v", ok, stored)
+	}
+}
+
+// A save that cannot stage the new record leaves the previous one untouched, so a
+// crash mid write can never turn a job that was running into an unreadable record
+// that the next start would remove together with its files.
+func TestSaveKeepsThePreviousRecordWhenTheWriteFails(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	now := time.Now().UTC()
+	inputPath := seedJob(t, store, "running-job", "running", now)
+	jobDir := filepath.Dir(inputPath)
+
+	before, err := os.ReadFile(filepath.Join(jobDir, "job.json"))
+	if err != nil {
+		t.Fatalf("read job.json: %v", err)
+	}
+	// A directory in the temporary file's place makes staging the record fail.
+	if err := os.Mkdir(filepath.Join(jobDir, recordTempName), 0o755); err != nil {
+		t.Fatalf("block temporary record: %v", err)
+	}
+
+	job, ok, err := store.Get("running-job")
+	if err != nil || !ok {
+		t.Fatalf("expected the seeded job, ok=%v err=%v", ok, err)
+	}
+	job.Metadata.Status = "completed"
+	job.Metadata.UpdatedAt = now.Add(time.Minute)
+	if err := store.Save(job); err == nil {
+		t.Fatalf("expected Save to fail when the record cannot be staged")
+	}
+
+	after, err := os.ReadFile(filepath.Join(jobDir, "job.json"))
+	if err != nil {
+		t.Fatalf("read job.json after the failed save: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("expected job.json to be left byte for byte as it was\nbefore: %s\nafter: %s", before, after)
+	}
+	stored, ok := readJobRecord(jobDir, "running-job")
+	if !ok || stored.Metadata.Status != "running" {
+		t.Fatalf("expected the previous running record on disk, ok=%v record=%#v", ok, stored)
+	}
+}
+
+// A temporary record left by a crash sits next to a valid job.json, so the job is
+// loaded as usual instead of being treated as an orphan, and the next save that
+// stages a new record replaces the leftover.
+func TestLoadIgnoresALeftoverTemporaryRecord(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	now := time.Now().UTC()
+	inputPath := seedJob(t, store, "survivor", "completed", now)
+	jobDir := filepath.Dir(inputPath)
+	leftover := filepath.Join(jobDir, recordTempName)
+	if err := os.WriteFile(leftover, []byte(`{"id":"trunc`), 0o644); err != nil {
+		t.Fatalf("write leftover temporary record: %v", err)
+	}
+
+	reloaded, err := New(root)
+	if err != nil {
+		t.Fatalf("New (reload): %v", err)
+	}
+	job, ok, err := reloaded.Get("survivor")
+	if err != nil || !ok {
+		t.Fatalf("expected the job to be reloaded despite the leftover, ok=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(inputPath); err != nil {
+		t.Fatalf("expected the job directory to be kept: %v", err)
+	}
+	if job.InputPath != inputPath || !strings.HasPrefix(filepath.Base(job.OutputPath), "output_") {
+		t.Fatalf("expected the stored documents to be found, got input=%q output=%q", job.InputPath, job.OutputPath)
+	}
+	if job.Metadata.Status != "completed" {
+		t.Fatalf("expected the record next to the leftover to be loaded as is, got %#v", job.Metadata)
+	}
+
+	job.Metadata.UpdatedAt = now.Add(time.Minute)
+	if err := reloaded.Save(job); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("expected the leftover temporary record to be gone after a save, got %v", err)
+	}
+	stored, ok := readJobRecord(jobDir, "survivor")
+	if !ok || !stored.Metadata.UpdatedAt.Equal(job.Metadata.UpdatedAt) {
+		t.Fatalf("expected the saved record on disk, ok=%v record=%#v", ok, stored)
 	}
 }
 
