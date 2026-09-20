@@ -461,3 +461,56 @@ func seedJob(t *testing.T, store *Store, id, status string, updatedAt time.Time)
 	}
 	return inputPath
 }
+
+func TestLoadOnlyRestoresCompletedOutputs(t *testing.T) {
+	t.Parallel()
+	for _, status := range []string{"queued", "running", "failed", "completed"} {
+		t.Run(status, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := New(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			updatedAt := time.Now().UTC().Add(-time.Hour)
+			input := seedJob(t, store, "job", status, updatedAt)
+			job, _, _ := store.Get("job")
+			job.Metadata.Output.DownloadURL = "/stale-result"
+			if err := store.Save(job); err != nil {
+				t.Fatal(err)
+			}
+			for reload := 1; reload <= 2; reload++ {
+				store, err = New(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				job, ok, err := store.Get("job")
+				if err != nil || !ok {
+					t.Fatalf("reload %d: ok=%v err=%v", reload, ok, err)
+				}
+				if job.InputPath != input || !job.Metadata.UpdatedAt.Equal(updatedAt) {
+					t.Fatalf("input or timestamp changed: %#v", job)
+				}
+				if status == "completed" {
+					if job.OutputPath != filepath.Join(filepath.Dir(input), "output_sample_masked.png") {
+						t.Errorf("completed output not restored: %q", job.OutputPath)
+					}
+				} else {
+					if job.OutputPath != "" || job.Metadata.Output.DownloadURL != "" {
+						t.Errorf("reload %d exposes unfinished output: %#v", reload, job)
+					}
+					if job.Metadata.Status != "failed" {
+						t.Errorf("status = %q", job.Metadata.Status)
+					}
+					if status != "failed" && (job.Metadata.Error == nil || job.Metadata.Error.Code != "job_interrupted") {
+						t.Errorf("missing interruption error: %#v", job.Metadata.Error)
+					}
+				}
+				for _, name := range []string{"input_sample.png", "output_sample_masked.png", "job.json"} {
+					if _, err := os.Stat(filepath.Join(filepath.Dir(input), name)); err != nil {
+						t.Errorf("file removed: %s: %v", name, err)
+					}
+				}
+			}
+		})
+	}
+}
