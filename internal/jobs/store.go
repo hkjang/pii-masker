@@ -177,7 +177,12 @@ func (s *Store) load() error {
 			continue
 		}
 		job.InputPath = firstExistingFile(jobDir, "input_")
-		job.OutputPath = firstExistingFile(jobDir, "output_")
+		// A leftover output is not proof that writing and completion succeeded.
+		if job.Metadata.Status == "completed" {
+			job.OutputPath = firstExistingFile(jobDir, "output_")
+		} else {
+			job.Metadata.Output.DownloadURL = ""
+		}
 		interrupted := job.Metadata.Status == "queued" || job.Metadata.Status == "running"
 		if interrupted {
 			job.Metadata.Status = "failed"

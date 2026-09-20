@@ -205,8 +205,10 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if job.OutputPath != "" {
+	if job.Metadata.Status == "completed" && job.OutputPath != "" {
 		job.Metadata.Output.DownloadURL = service.JoinPublicURL(s.config.Server.PublicBaseURL, "v1", "jobs", job.ID, "result")
+	} else {
+		job.Metadata.Output.DownloadURL = ""
 	}
 	writeJSON(w, http.StatusOK, job.Metadata)
 }
@@ -221,7 +223,7 @@ func (s *Server) handleGetJobResult(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if !ok || job.OutputPath == "" {
+	if !ok || job.Metadata.Status != "completed" || job.OutputPath == "" {
 		writeError(w, http.StatusNotFound, &core.APIError{
 			Code:    "job_result_not_found",
 			Message: "결과 파일을 찾을 수 없습니다.",
@@ -276,8 +278,10 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 
 	response := make([]core.ProcessMetadata, 0, len(items))
 	for _, item := range items {
-		if item.OutputPath != "" {
+		if item.Metadata.Status == "completed" && item.OutputPath != "" {
 			item.Metadata.Output.DownloadURL = service.JoinPublicURL(s.config.Server.PublicBaseURL, "v1", "jobs", item.ID, "result")
+		} else {
+			item.Metadata.Output.DownloadURL = ""
 		}
 		response = append(response, item.Metadata)
 	}

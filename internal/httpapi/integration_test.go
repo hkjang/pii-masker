@@ -1282,6 +1282,11 @@ func fetchHistory(t *testing.T, historyURL string) []core.ProcessMetadata {
 // the server would have left it behind.
 func seedStoredJobFiles(t *testing.T, jobsDir, jobID string, updatedAt time.Time) {
 	t.Helper()
+	seedStoredJobFilesWithStatus(t, jobsDir, jobID, updatedAt, "completed")
+}
+
+func seedStoredJobFilesWithStatus(t *testing.T, jobsDir, jobID string, updatedAt time.Time, status string) {
+	t.Helper()
 
 	jobDir := filepath.Join(jobsDir, jobID)
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
@@ -1292,7 +1297,8 @@ func seedStoredJobFiles(t *testing.T, jobsDir, jobID string, updatedAt time.Time
 		Metadata: core.ProcessMetadata{
 			RequestID: jobID,
 			JobID:     jobID,
-			Status:    "completed",
+			Status:    status,
+			Output:    core.FileDescriptor{FileName: "sample_masked.png", MIMEType: "image/png", DownloadURL: "/stale-result"},
 			CreatedAt: updatedAt,
 			UpdatedAt: updatedAt,
 		},
@@ -1677,4 +1683,127 @@ func padOffset(value int) string {
 
 func itoa(value int) string {
 	return strconv.Itoa(value)
+}
+
+func TestReloadedJobResultsRequireCompletion(t *testing.T) {
+	t.Parallel()
+	for _, status := range []string{"queued", "running", "failed", "completed", "completed-missing"} {
+		t.Run(status, func(t *testing.T) {
+			root := t.TempDir()
+			updatedAt := time.Now().UTC().Add(-time.Hour)
+			available := status == "completed"
+			for reload := 1; reload <= 2; reload++ {
+				t.Run(strconv.Itoa(reload), func(t *testing.T) {
+					serverURL, _ := startAppServerWithConfig(t, func(cfg *config.Config) {
+						cfg.Storage.RootDir = root
+						if reload == 1 {
+							storedStatus := status
+							if status == "completed-missing" {
+								storedStatus = "completed"
+							}
+							seedStoredJobFilesWithStatus(t, filepath.Join(root, "jobs"), "job", updatedAt, storedStatus)
+							if status == "completed-missing" {
+								if err := os.Remove(filepath.Join(root, "jobs", "job", "output_sample_masked.png")); err != nil {
+									t.Fatal(err)
+								}
+							}
+						}
+					})
+					response, err := http.Get(serverURL + "/v1/jobs/job")
+					if err != nil {
+						t.Fatal(err)
+					}
+					var metadata core.ProcessMetadata
+					err = json.NewDecoder(response.Body).Decode(&metadata)
+					response.Body.Close()
+					if err != nil || response.StatusCode != http.StatusOK {
+						t.Fatalf("lookup: status=%d err=%v", response.StatusCode, err)
+					}
+					history := fetchHistory(t, serverURL+"/v1/history")
+					if len(history) != 1 {
+						t.Fatalf("history length = %d", len(history))
+					}
+					for _, item := range []core.ProcessMetadata{metadata, history[0]} {
+						expectedStatus := "failed"
+						if strings.HasPrefix(status, "completed") {
+							expectedStatus = "completed"
+						}
+						if item.Status != expectedStatus || !item.UpdatedAt.Equal(updatedAt) {
+							t.Errorf("status/timestamp changed: %#v", item)
+						}
+						if (status == "queued" || status == "running") && (item.Error == nil || item.Error.Code != "job_interrupted") {
+							t.Errorf("missing interruption error: %#v", item.Error)
+						}
+						expectedURL := ""
+						if available {
+							expectedURL = "/v1/jobs/job/result"
+						}
+						if item.Output.DownloadURL != expectedURL {
+							t.Errorf("download URL = %q, want %q", item.Output.DownloadURL, expectedURL)
+						}
+					}
+					for _, probe := range []struct{ method, byteRange string }{{http.MethodGet, ""}, {http.MethodHead, ""}, {http.MethodGet, "bytes=1-3"}} {
+						request, err := http.NewRequest(probe.method, serverURL+"/v1/jobs/job/result", nil)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if probe.byteRange != "" {
+							request.Header.Set("Range", probe.byteRange)
+						}
+						result, err := http.DefaultClient.Do(request)
+						if err != nil {
+							t.Fatal(err)
+						}
+						body, err := io.ReadAll(result.Body)
+						result.Body.Close()
+						if err != nil {
+							t.Fatal(err)
+						}
+						wantStatus := http.StatusNotFound
+						if available {
+							wantStatus = http.StatusOK
+							if probe.byteRange != "" {
+								wantStatus = http.StatusPartialContent
+							}
+						}
+						if result.StatusCode != wantStatus {
+							t.Errorf("%s range=%q: status=%d want=%d", probe.method, probe.byteRange, result.StatusCode, wantStatus)
+						}
+						if result.Header.Get("Cache-Control") != "no-store" || result.Header.Get("X-Content-Type-Options") != "nosniff" {
+							t.Errorf("missing document headers: %v", result.Header)
+						}
+						if probe.method == http.MethodHead {
+							if len(body) != 0 {
+								t.Errorf("HEAD body = %q", body)
+							}
+							if available && result.ContentLength != 6 {
+								t.Errorf("HEAD length = %d", result.ContentLength)
+							}
+						} else if available {
+							expectedBody := "masked"
+							if probe.byteRange != "" {
+								expectedBody = "ask"
+								if result.Header.Get("Content-Range") != "bytes 1-3/6" {
+									t.Errorf("Content-Range = %q", result.Header.Get("Content-Range"))
+								}
+							}
+							if string(body) != expectedBody {
+								t.Errorf("body = %q", body)
+							}
+						} else if !bytes.Contains(body, []byte(`"code":"job_result_not_found"`)) {
+							t.Errorf("unexpected error body: %s", body)
+						}
+					}
+					for _, name := range []string{"job.json", "input_sample.png", "output_sample_masked.png"} {
+						if status == "completed-missing" && strings.HasPrefix(name, "output_") {
+							continue
+						}
+						if _, err := os.Stat(filepath.Join(root, "jobs", "job", name)); err != nil {
+							t.Errorf("file removed: %s: %v", name, err)
+						}
+					}
+				})
+			}
+		})
+	}
 }
