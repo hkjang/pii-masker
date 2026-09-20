@@ -20,6 +20,7 @@
   - 작업 상태 조회
 - `GET /v1/jobs/{job_id}/result`
   - 결과 파일 다운로드
+  - `HEAD`도 허용(본문 없이 크기·헤더만)
 - `GET /v1/history`
   - 최근 작업 이력 조회 (`?limit=` 기본 20, 최대 100)
 - `POST /v1/test-connection`

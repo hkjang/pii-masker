@@ -661,6 +661,70 @@ func TestJobResultServesRangeRequests(t *testing.T) {
 	}
 }
 
+// TestJobResultAnswersHeadProbes checks that download managers, `curl -I` and proxies can
+// probe a result's existence and size with HEAD: the same headers as GET, no body.
+func TestJobResultAnswersHeadProbes(t *testing.T) {
+	t.Parallel()
+
+	serverURL, _ := startAppServerWithConfig(t, nil)
+	jobID := createCompletedPDFJob(t, serverURL)
+	resultURL := serverURL + "/v1/jobs/" + url.PathEscape(jobID) + "/result"
+
+	getResponse, err := http.Get(resultURL)
+	if err != nil {
+		t.Fatalf("get job result: %v", err)
+	}
+	defer getResponse.Body.Close()
+	if getResponse.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected get status %d", getResponse.StatusCode)
+	}
+	fullBytes, _ := io.ReadAll(getResponse.Body)
+	if len(fullBytes) < 32 {
+		t.Fatalf("expected a non-trivial pdf result, got %d bytes", len(fullBytes))
+	}
+
+	headResponse, err := http.Head(resultURL)
+	if err != nil {
+		t.Fatalf("head job result: %v", err)
+	}
+	defer headResponse.Body.Close()
+	if headResponse.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected head status %d (allow=%q)", headResponse.StatusCode, headResponse.Header.Get("Allow"))
+	}
+	if headResponse.ContentLength != int64(len(fullBytes)) {
+		t.Fatalf("head content-length %d does not match the get body length %d", headResponse.ContentLength, len(fullBytes))
+	}
+	if headBytes, _ := io.ReadAll(headResponse.Body); len(headBytes) != 0 {
+		t.Fatalf("expected an empty head body, got %d bytes", len(headBytes))
+	}
+	for header, want := range map[string]string{
+		"Accept-Ranges":          "bytes",
+		"Cache-Control":          "no-store",
+		"X-Content-Type-Options": "nosniff",
+		"Content-Disposition":    getResponse.Header.Get("Content-Disposition"),
+		"Content-Type":           getResponse.Header.Get("Content-Type"),
+	} {
+		if got := headResponse.Header.Get(header); got != want {
+			t.Fatalf("head %s = %q, want %q", header, got, want)
+		}
+	}
+	if !strings.Contains(headResponse.Header.Get("Content-Type"), "application/pdf") {
+		t.Fatalf("unexpected head content type: %s", headResponse.Header.Get("Content-Type"))
+	}
+	if headResponse.Header.Get("Content-Disposition") == "" {
+		t.Fatalf("expected a content-disposition header on the head response")
+	}
+
+	missingResponse, err := http.Head(serverURL + "/v1/jobs/does-not-exist/result")
+	if err != nil {
+		t.Fatalf("head missing job result: %v", err)
+	}
+	defer missingResponse.Body.Close()
+	if missingResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("unexpected status %d for a missing job", missingResponse.StatusCode)
+	}
+}
+
 // TestJobResultReturnsNotFoundWhenFileIsGone covers a result file that disappeared from
 // disk after the job completed: that is a missing result, not an internal failure.
 func TestJobResultReturnsNotFoundWhenFileIsGone(t *testing.T) {

@@ -82,7 +82,11 @@ func (s *Server) routes() {
 	s.router.HandleFunc("/v1/mask", documentResponse(s.handleMask)).Methods(http.MethodPost)
 	s.router.HandleFunc("/v1/jobs", documentResponse(s.handleCreateJob)).Methods(http.MethodPost)
 	s.router.HandleFunc("/v1/jobs/{job_id}", documentResponse(s.handleGetJob)).Methods(http.MethodGet)
-	s.router.HandleFunc("/v1/jobs/{job_id}/result", documentResponse(s.handleGetJobResult)).Methods(http.MethodGet)
+	// HEAD is opened on the result only: http.ServeContent already answers it with the
+	// same headers and no body, so download managers and proxies can probe size and
+	// existence. The JSON endpoints do not set Content-Length themselves, so HEAD
+	// would mean something different there and stays closed.
+	s.router.HandleFunc("/v1/jobs/{job_id}/result", documentResponse(s.handleGetJobResult)).Methods(http.MethodGet, http.MethodHead)
 	s.router.HandleFunc("/v1/history", documentResponse(s.handleHistory)).Methods(http.MethodGet)
 }
 
