@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"pii-masker/internal/config"
 	"pii-masker/internal/document"
@@ -738,10 +739,17 @@ func truncateString(value string, maxLength int) string {
 	if maxLength <= 0 || len(value) <= maxLength {
 		return value
 	}
-	if maxLength <= 3 {
-		return value[:maxLength]
+	end := maxLength
+	suffix := ""
+	if maxLength > 3 {
+		end -= 3
+		suffix = "..."
 	}
-	return value[:maxLength-3] + "..."
+	// Keep the byte budget without splitting a UTF-8 character.
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end] + suffix
 }
 
 func defaultIfEmpty(value, fallback string) string {

@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"pii-masker/internal/app"
 	"pii-masker/internal/config"
@@ -1804,6 +1805,107 @@ func TestReloadedJobResultsRequireCompletion(t *testing.T) {
 					}
 				})
 			}
+		})
+	}
+}
+
+func TestUpstreamDiagnosticsPreserveUTF8(t *testing.T) {
+	t.Parallel()
+
+	message := strings.Repeat("가", 6000)
+	payload := `{"message":"` + message + `","fields":[]}`
+	for _, status := range []int{http.StatusInternalServerError, http.StatusOK} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, payload)
+			})
+			serverURL, _ := startAppServerWithUpstream(t, upstream, nil)
+			assertDiagnostic := func(t *testing.T, got, want string, limit int) {
+				t.Helper()
+				if !utf8.ValidString(got) || strings.ContainsRune(got, '\uFFFD') {
+					t.Errorf("diagnostic contains damaged UTF-8")
+				}
+				if got != want {
+					t.Errorf("diagnostic differs from expected complete prefix and ellipsis (got %d bytes, want %d)", len(got), len(want))
+				}
+				if len(got) != len(want) || len(got) > limit {
+					t.Errorf("unexpected diagnostic length %d, want %d within %d", len(got), len(want), limit)
+				}
+			}
+			if status == http.StatusInternalServerError {
+				t.Run("connection", func(t *testing.T) {
+					response, err := http.Post(serverURL+"/v1/test-connection", "application/json", http.NoBody)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer response.Body.Close()
+					if response.StatusCode != http.StatusOK {
+						t.Fatalf("connection status = %d", response.StatusCode)
+					}
+					var result struct {
+						OK        bool   `json:"ok"`
+						ErrorCode string `json:"error_code"`
+						Retryable bool   `json:"retryable"`
+						Detail    string `json:"detail"`
+					}
+					if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+						t.Fatal(err)
+					}
+					if result.OK || result.ErrorCode != "server_error" || !result.Retryable {
+						t.Fatalf("unexpected connection result: %#v", result)
+					}
+					assertDiagnostic(t, result.Detail, strings.Repeat("가", 92)+"...", 280)
+				})
+			}
+			t.Run("mask", func(t *testing.T) {
+				input := createBlankPNG(t, 40, 20)
+				body, contentType := buildMultipartBody(t, "sample.png", "image/png", input, nil)
+				response, err := http.Post(serverURL+"/v1/mask", contentType, body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer response.Body.Close()
+				if status == http.StatusInternalServerError {
+					if response.StatusCode != http.StatusBadGateway {
+						t.Fatalf("mask status = %d", response.StatusCode)
+					}
+					var metadata core.ProcessMetadata
+					if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+						t.Fatal(err)
+					}
+					if metadata.Status != "failed" || metadata.Error == nil ||
+						metadata.Error.Code != "server_error" || !metadata.Error.Retryable {
+						t.Fatalf("unexpected mask error: %#v", metadata)
+					}
+					assertDiagnostic(t, metadata.Error.Detail, strings.Repeat("가", 92)+"...", 280)
+					return
+				}
+				if response.StatusCode != http.StatusOK {
+					t.Fatalf("mask status = %d", response.StatusCode)
+				}
+				metadata, fileBytes := parseMultipartMaskResponse(t, response)
+				if metadata.Status != "completed" || metadata.MaskPolicy.AppliedRegions != 0 || metadata.Error != nil {
+					t.Fatalf("unexpected successful mask: %#v", metadata)
+				}
+				if metadata.Output.MIMEType != "image/png" || !bytes.Equal(fileBytes, input) {
+					t.Fatal("expected unchanged PNG file part for empty fields")
+				}
+				if metadata.Engine.Debug == nil {
+					t.Fatal("missing response debug")
+				}
+				var debug struct {
+					Body string `json:"body"`
+				}
+				if err := json.Unmarshal([]byte(metadata.Engine.Debug.Response), &debug); err != nil {
+					t.Fatal(err)
+				}
+				// formatDebugBody pretty-prints the JSON before applying its byte budget.
+				prefix := "{\n  \"fields\": [],\n  \"message\": \""
+				want := prefix + strings.Repeat("가", (16*1024-3-len(prefix))/3) + "..."
+				assertDiagnostic(t, debug.Body, want, 16*1024)
+			})
 		})
 	}
 }
