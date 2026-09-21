@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"pii-masker/internal/config"
 	"pii-masker/internal/document"
@@ -421,4 +422,57 @@ func createPNG(t *testing.T, width, height int) []byte {
 		t.Fatalf("encode png: %v", err)
 	}
 	return buf.Bytes()
+}
+
+func TestTruncateStringPreservesUTF8Boundaries(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		value string
+		limit int
+		want  string
+	}{
+		{"empty", "  ", 1, ""},
+		{"trim", " \t가 나\n", 20, "가 나"},
+		{"zero unlimited", " 가🙂 ", 0, "가🙂"},
+		{"negative unlimited", " 가🙂 ", -1, "가🙂"},
+		{"ascii below", "abc", 4, "abc"},
+		{"ascii exact", "abc", 3, "abc"},
+		{"ascii one", "abcd", 1, "a"},
+		{"ascii two", "abcd", 2, "ab"},
+		{"ascii three", "abcd", 3, "abc"},
+		{"ascii ellipsis", "abcdef", 5, "ab..."},
+		{"korean one", "가나", 1, ""},
+		{"korean two", "가나", 2, ""},
+		{"korean three", "가나", 3, "가"},
+		{"korean below", "가나", 7, "가나"},
+		{"korean exact", "가나", 6, "가나"},
+		{"korean over", "가나", 5, "..."},
+		{"korean prefix exact", "가나다", 6, "가..."},
+		{"korean prefix over", "가나다", 7, "가..."},
+		{"emoji one", "🙂🙂", 1, ""},
+		{"emoji two", "🙂🙂", 2, ""},
+		{"emoji three", "🙂🙂", 3, ""},
+		{"emoji below", "🙂🙂", 9, "🙂🙂"},
+		{"emoji exact", "🙂🙂", 8, "🙂🙂"},
+		{"emoji prefix exact", "🙂🙂", 7, "🙂..."},
+		{"emoji prefix short", "🙂🙂", 6, "..."},
+		{"mixed prefix short", "a가🙂bc", 7, "a가..."},
+		{"mixed prefix split", "a가🙂bc", 8, "a가..."},
+		{"mixed exact", "a가🙂", 8, "a가🙂"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateString(tt.value, tt.limit)
+			if got != tt.want {
+				t.Errorf("got %q (%d bytes), want %q (%d bytes)", got, len(got), tt.want, len(tt.want))
+			}
+			if !utf8.ValidString(got) || strings.ContainsRune(got, '\uFFFD') {
+				t.Errorf("damaged UTF-8: %q", got)
+			}
+			if tt.limit > 0 && len(got) > tt.limit {
+				t.Errorf("length %d exceeds budget %d", len(got), tt.limit)
+			}
+		})
+	}
 }
