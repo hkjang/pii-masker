@@ -417,9 +417,17 @@ func (s *Service) runJob(jobID string, options upstage.ParseOptions) {
 	job.Metadata.UpdatedAt = time.Now().UTC()
 	_ = s.jobStore.Save(job)
 
+	// process builds its metadata from scratch, so the moment the upload was accepted
+	// has to be carried over. A job waits in the queue before a slot frees up, and
+	// letting the replacement stand would date every record from the start of its run
+	// instead: the queue wait would read as zero and the history would be ordered by
+	// when work began rather than by when the client handed the document over.
+	createdAt := job.Metadata.CreatedAt
+
 	metadata, maskedContent, processErr := s.process(context.Background(), jobID, input)
 	job.Metadata = *metadata
 	job.Metadata.JobID = jobID
+	job.Metadata.CreatedAt = createdAt
 	job.Metadata.UpdatedAt = time.Now().UTC()
 
 	if processErr == nil {

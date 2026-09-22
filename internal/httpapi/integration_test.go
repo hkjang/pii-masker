@@ -1909,3 +1909,128 @@ func TestUpstreamDiagnosticsPreserveUTF8(t *testing.T) {
 		})
 	}
 }
+
+// A job is accepted before it has a slot to run in, so created_at is the moment the
+// upload arrived and must survive the wait in the queue. runJob replaces the whole
+// metadata with the one process builds from scratch, so without care the record ends
+// up claiming the job was created when a slot finally freed up, and every client that
+// measures queue time or orders jobs by acceptance reads that instead.
+func TestQueuedJobKeepsTheTimeItWasAccepted(t *testing.T) {
+	t.Parallel()
+
+	gated, inFlight, _, releaseGate := newGatedUpstream()
+	serverURL, cfg := startAppServerWithUpstream(t, gated, func(cfg *config.Config) {
+		cfg.Limits.MaxConcurrentJobs = 1
+		cfg.Upstage.Timeout = 60 * time.Second
+	})
+	// Registered after the servers so it runs before their cleanup: a failing
+	// assertion must not leave a request parked in the handler, or shutdown would
+	// block instead of reporting the failure.
+	t.Cleanup(releaseGate)
+
+	// The first job takes the only slot and holds it inside the upstream handler.
+	postJobForPNG(t, serverURL)
+	waitForCondition(t, "the first job to reach the upstream", func() bool {
+		return atomic.LoadInt64(inFlight) >= 1
+	})
+
+	accepted := postJobForPNG(t, serverURL)
+	if accepted.CreatedAt.IsZero() {
+		t.Fatalf("expected the accepted job to carry a creation time")
+	}
+	// Keep the slot busy long enough that a creation time taken when the job starts
+	// would be unmistakably later than the one the upload was answered with.
+	time.Sleep(300 * time.Millisecond)
+	releaseGate()
+
+	waitForCondition(t, "job "+accepted.JobID+" to complete", func() bool {
+		return jobStatus(t, serverURL, accepted.JobID) == "completed"
+	})
+
+	completed := fetchJobMetadata(t, serverURL, accepted.JobID)
+	if !completed.CreatedAt.Equal(accepted.CreatedAt) {
+		t.Fatalf("expected created_at to stay at %s, got %s",
+			accepted.CreatedAt.Format(time.RFC3339Nano), completed.CreatedAt.Format(time.RFC3339Nano))
+	}
+	// updated_at is deliberately not compared against created_at: both are wall clock
+	// readings, and a host whose clock is stepped backwards can legitimately stamp the
+	// finish before the start.
+
+	// The history listing serves a copy of the same record, so it has to report the
+	// same moment the job lookup does.
+	listed := false
+	for _, item := range fetchHistory(t, serverURL+"/v1/history") {
+		if item.JobID != accepted.JobID {
+			continue
+		}
+		listed = true
+		if !item.CreatedAt.Equal(accepted.CreatedAt) {
+			t.Fatalf("expected history created_at %s, got %s",
+				accepted.CreatedAt.Format(time.RFC3339Nano), item.CreatedAt.Format(time.RFC3339Nano))
+		}
+	}
+	if !listed {
+		t.Fatalf("expected job %s in the history listing", accepted.JobID)
+	}
+
+	// The stored record is what the next start reads back, so it has to carry the same
+	// moment rather than the one the run happened to begin at.
+	raw, err := os.ReadFile(filepath.Join(cfg.Storage.RootDir, "jobs", accepted.JobID, "job.json"))
+	if err != nil {
+		t.Fatalf("read stored record: %v", err)
+	}
+	var stored struct {
+		Metadata core.ProcessMetadata `json:"metadata"`
+	}
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatalf("decode stored record: %v", err)
+	}
+	if !stored.Metadata.CreatedAt.Equal(accepted.CreatedAt) {
+		t.Fatalf("expected stored created_at %s, got %s",
+			accepted.CreatedAt.Format(time.RFC3339Nano), stored.Metadata.CreatedAt.Format(time.RFC3339Nano))
+	}
+}
+
+func postJobForPNG(t *testing.T, serverURL string) core.ProcessMetadata {
+	t.Helper()
+
+	requestBody, contentType := buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 400, 200), nil)
+	response, err := http.Post(serverURL+"/v1/jobs", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/jobs: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	var metadata core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+		t.Fatalf("decode job metadata: %v", err)
+	}
+	if metadata.JobID == "" {
+		t.Fatalf("expected job id")
+	}
+	return metadata
+}
+
+func fetchJobMetadata(t *testing.T, serverURL, jobID string) core.ProcessMetadata {
+	t.Helper()
+
+	response, err := http.Get(serverURL + "/v1/jobs/" + url.PathEscape(jobID))
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	var metadata core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+		t.Fatalf("decode job metadata: %v", err)
+	}
+	return metadata
+}
