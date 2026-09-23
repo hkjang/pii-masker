@@ -1991,6 +1991,62 @@ func TestQueuedJobKeepsTheTimeItWasAccepted(t *testing.T) {
 	}
 }
 
+// The upload answer and the job lookup read the same record, so the download URL has
+// to appear at the same moment in both: only once a result file exists.
+func TestAcceptedJobAnnouncesTheDownloadURLOnlyOnceTheResultExists(t *testing.T) {
+	t.Parallel()
+
+	gated, inFlight, _, releaseGate := newGatedUpstream()
+	serverURL, _ := startAppServerWithUpstream(t, gated, func(cfg *config.Config) {
+		cfg.Limits.MaxConcurrentJobs = 1
+		cfg.Upstage.Timeout = 60 * time.Second
+	})
+	// Registered after the servers so it runs before their cleanup: a failing
+	// assertion must not leave a request parked in the handler, or shutdown would
+	// block instead of reporting the failure.
+	t.Cleanup(releaseGate)
+
+	// The first job takes the only slot and holds it inside the upstream handler.
+	postJobForPNG(t, serverURL)
+	waitForCondition(t, "the first job to reach the upstream", func() bool {
+		return atomic.LoadInt64(inFlight) >= 1
+	})
+
+	accepted := postJobForPNG(t, serverURL)
+	if accepted.Status != "queued" {
+		t.Fatalf("expected the second job to wait for the slot, got status %q", accepted.Status)
+	}
+	if accepted.Output.DownloadURL != "" {
+		t.Fatalf("expected no download url on a queued job, got %q", accepted.Output.DownloadURL)
+	}
+	// The job lookup has to agree with the upload answer while the job is still queued.
+	if queued := fetchJobMetadata(t, serverURL, accepted.JobID); queued.Output.DownloadURL != "" {
+		t.Fatalf("expected the job lookup to withhold the download url too, got %q", queued.Output.DownloadURL)
+	}
+
+	releaseGate()
+	waitForCondition(t, "job "+accepted.JobID+" to complete", func() bool {
+		return jobStatus(t, serverURL, accepted.JobID) == "completed"
+	})
+
+	completed := fetchJobMetadata(t, serverURL, accepted.JobID)
+	wantURL := "/v1/jobs/" + accepted.JobID + "/result"
+	if completed.Output.DownloadURL != wantURL {
+		t.Fatalf("expected the completed job to carry %q, got %q", wantURL, completed.Output.DownloadURL)
+	}
+
+	// Withholding the URL until now is only correct if it works the moment it appears.
+	resultResponse, err := http.Get(serverURL + completed.Output.DownloadURL)
+	if err != nil {
+		t.Fatalf("get job result: %v", err)
+	}
+	defer resultResponse.Body.Close()
+	if resultResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resultResponse.Body)
+		t.Fatalf("unexpected result status %d: %s", resultResponse.StatusCode, string(body))
+	}
+}
+
 func postJobForPNG(t *testing.T, serverURL string) core.ProcessMetadata {
 	t.Helper()
 
