@@ -184,7 +184,15 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	job.Metadata.Output.DownloadURL = service.JoinPublicURL(s.config.Server.PublicBaseURL, "v1", "jobs", job.ID, "result")
+	// A job answered here has no result file yet, so advertising the download URL
+	// would hand out a link that only answers job_result_not_found. The job lookup
+	// starts reporting it once the run has written a result, and this path uses the
+	// same rule so the two never disagree about the same record.
+	if job.Metadata.Status == "completed" && job.OutputPath != "" {
+		job.Metadata.Output.DownloadURL = service.JoinPublicURL(s.config.Server.PublicBaseURL, "v1", "jobs", job.ID, "result")
+	} else {
+		job.Metadata.Output.DownloadURL = ""
+	}
 	writeJSON(w, http.StatusAccepted, job.Metadata)
 }
 
