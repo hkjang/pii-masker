@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -106,10 +107,13 @@ type MockConfig struct {
 
 func Load() (Config, error) {
 	rootDir := envOrDefault("PII_MASKER_STORAGE_DIR", filepath.Join(".", "data"))
+	// The listen address is read once so that the embedded mock upstream below and
+	// the server config further down cannot drift apart.
+	address := envOrDefault("PII_MASKER_ADDR", defaultAddress)
 	baseURL := strings.TrimSpace(os.Getenv("PII_MASKER_UPSTAGE_BASE_URL"))
 	mockEnabled := envBool("PII_MASKER_ENABLE_EMBEDDED_UPSTAGE_MOCK", false)
 	if baseURL == "" && mockEnabled {
-		baseURL = "http://localhost:8080/internal/mock/upstage/inference"
+		baseURL = localMockBaseURL(address)
 	}
 	if baseURL == "" {
 		baseURL = "http://localhost:8080/inference"
@@ -122,7 +126,7 @@ func Load() (Config, error) {
 
 	cfg := Config{
 		Server: ServerConfig{
-			Address:           envOrDefault("PII_MASKER_ADDR", defaultAddress),
+			Address:           address,
 			PublicBaseURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("PII_MASKER_PUBLIC_BASE_URL")), "/"),
 			ReadHeaderTimeout: envSeconds("PII_MASKER_READ_HEADER_TIMEOUT_SECONDS", DefaultReadHeaderTimeout),
 			IdleTimeout:       envSeconds("PII_MASKER_IDLE_TIMEOUT_SECONDS", DefaultIdleTimeout),
@@ -163,6 +167,26 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("failed to create storage dir: %w", err)
 	}
 	return cfg, nil
+}
+
+// localMockBaseURL points the embedded mock upstream back at this very process:
+// app.New mounts the mock handler on the same mux that serves the API, so the
+// default has to follow the address the server listens on instead of a fixed port.
+// An address that is not host:port keeps the historical default.
+func localMockBaseURL(address string) string {
+	const path = "/internal/mock/upstage/inference"
+
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return "http://localhost:8080" + path
+	}
+	switch host {
+	// A wildcard or missing host is what the server binds to, not something a
+	// client can dial, so the loopback name stands in for it.
+	case "", "0.0.0.0", "::":
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port) + path
 }
 
 func normalizeEndpointURL(raw string) (string, *url.URL, error) {

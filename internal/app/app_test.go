@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"image/png"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -329,6 +330,86 @@ func pngUploadBody(t *testing.T) ([]byte, string) {
 		t.Fatalf("close writer: %v", err)
 	}
 	return body.Bytes(), writer.FormDataContentType()
+}
+
+// The embedded mock is mounted on the same mux as the API, so a service started on
+// any address must reach it there. This goes through config.Load instead of the
+// hand built config the other tests use, because the default upstream is decided
+// there. t.Setenv forbids t.Parallel.
+func TestEmbeddedMockMasksOnANonDefaultListenAddress(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	address := listener.Addr().String()
+	_, port, err := net.SplitHostPort(address)
+	if err != nil {
+		t.Fatalf("split listen address: %v", err)
+	}
+
+	t.Setenv("PII_MASKER_STORAGE_DIR", t.TempDir())
+	t.Setenv("PII_MASKER_ENABLE_EMBEDDED_UPSTAGE_MOCK", "true")
+	t.Setenv("PII_MASKER_UPSTAGE_BASE_URL", "")
+	t.Setenv("PII_MASKER_ADDR", address)
+
+	cfg, err := config.Load()
+	if err != nil {
+		listener.Close()
+		t.Fatalf("load config: %v", err)
+	}
+	// Asserted separately so a failure below cannot be blamed on whatever else
+	// happens to listen on port 8080 on the machine running the test.
+	if !strings.Contains(cfg.Upstage.BaseURL, ":"+port+"/") {
+		listener.Close()
+		t.Fatalf("expected the mock upstream %q to use the listen port %s", cfg.Upstage.BaseURL, port)
+	}
+
+	application, err := app.New(cfg)
+	if err != nil {
+		listener.Close()
+		t.Fatalf("new app: %v", err)
+	}
+	t.Cleanup(application.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- application.Serve(ctx, listener)
+	}()
+
+	body, contentType := pngUploadBody(t)
+	response, err := http.Post("http://"+address+"/v1/mask", contentType, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, raw)
+	}
+	// A successful mask answers with the metadata part followed by the masked file.
+	mediaType, params, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
+		t.Fatalf("unexpected content type %q (%v)", response.Header.Get("Content-Type"), err)
+	}
+	part, err := multipart.NewReader(response.Body, params["boundary"]).NextPart()
+	if err != nil {
+		t.Fatalf("read metadata part: %v", err)
+	}
+	var metadata core.ProcessMetadata
+	if err := json.NewDecoder(part).Decode(&metadata); err != nil {
+		t.Fatalf("decode mask metadata: %v", err)
+	}
+	if metadata.Status != "completed" {
+		t.Fatalf("unexpected status %q", metadata.Status)
+	}
+
+	cancel()
+	if err := waitForServe(t, serveErr); err != nil {
+		t.Fatalf("serve returned %v", err)
+	}
 }
 
 func startServer(t *testing.T, customize func(*config.Config)) (*app.App, string, <-chan error, context.CancelFunc) {
