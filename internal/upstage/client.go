@@ -456,9 +456,33 @@ func (c *Client) httpClient() *http.Client {
 			if len(via) >= maxUpstreamRedirects {
 				return fmt.Errorf("stopped after %d redirects", maxUpstreamRedirects)
 			}
+			if len(via) > 0 {
+				if err := checkRedirectScheme(via[0].URL, request.URL); err != nil {
+					return err
+				}
+			}
 			return c.checkURLAllowed(request.URL)
 		},
 	}
+}
+
+// checkRedirectScheme refuses a redirect that drops a request that started on
+// https down to plain http. Go replays the multipart body from GetBody on 307 and
+// 308, so following such a redirect would put the uploaded document and the API
+// token back on the wire in clear text. A chain that started on http (the
+// embedded mock upstream, or an operator who configured a plain endpoint on
+// purpose) is left alone.
+func checkRedirectScheme(first *url.URL, target *url.URL) error {
+	if first == nil || target == nil {
+		return nil
+	}
+	if !strings.EqualFold(first.Scheme, "https") {
+		return nil
+	}
+	if strings.EqualFold(target.Scheme, "https") {
+		return nil
+	}
+	return fmt.Errorf("refusing to follow a redirect from https to %s", defaultIfEmpty(target.Scheme, "an empty scheme"))
 }
 
 // allowedHosts lists the hosts this client may talk to. An empty configuration
