@@ -284,6 +284,68 @@ func TestParseDocumentFollowsRedirectToAllowedHost(t *testing.T) {
 	}
 }
 
+// TestUpstreamCheckRedirectRefusesHTTPSDowngrade drives the redirect policy the
+// production client installs. The https axis cannot be covered end to end here
+// because httpClient() uses the default transport, so a self-signed
+// httptest.NewTLSServer would fail on certificate verification instead.
+func TestUpstreamCheckRedirectRefusesHTTPSDowngrade(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(config.UpstageConfig{
+		BaseURL:    "https://api.upstage.ai/inference",
+		Timeout:    5 * time.Second,
+		Model:      "pii",
+		AllowHosts: []string{"api.upstage.ai"},
+	})
+	checkRedirect := client.httpClient().CheckRedirect
+	if checkRedirect == nil {
+		t.Fatal("expected the upstream client to install a redirect policy")
+	}
+
+	cases := []struct {
+		name    string
+		first   string
+		target  string
+		allowed bool
+	}{
+		{name: "https to https", first: "https://api.upstage.ai/inference", target: "https://api.upstage.ai/v2/inference", allowed: true},
+		{name: "https to http on the same host", first: "https://api.upstage.ai/inference", target: "http://api.upstage.ai/v2/inference", allowed: false},
+		{name: "http to http", first: "http://api.upstage.ai/inference", target: "http://api.upstage.ai/v2/inference", allowed: true},
+		{name: "http to https", first: "http://api.upstage.ai/inference", target: "https://api.upstage.ai/v2/inference", allowed: true},
+		{name: "uppercase https scheme still blocks the downgrade", first: "HTTPS://api.upstage.ai/inference", target: "http://api.upstage.ai/v2/inference", allowed: false},
+	}
+
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			first, err := http.NewRequest(http.MethodPost, testCase.first, nil)
+			if err != nil {
+				t.Fatalf("build the first request: %v", err)
+			}
+			next, err := http.NewRequest(http.MethodPost, testCase.target, nil)
+			if err != nil {
+				t.Fatalf("build the redirect target request: %v", err)
+			}
+
+			err = checkRedirect(next, []*http.Request{first})
+			if testCase.allowed && err != nil {
+				t.Fatalf("expected the redirect to be followed, got %v", err)
+			}
+			if !testCase.allowed {
+				if err == nil {
+					t.Fatal("expected the redirect to be refused")
+				}
+				var blockedHost *blockedHostError
+				if errors.As(err, &blockedHost) {
+					t.Fatalf("a scheme downgrade must not be reported as a blocked host: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestTestConnectionRejectsHostOutsideAllowList(t *testing.T) {
 	t.Parallel()
 
