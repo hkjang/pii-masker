@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -16,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -501,3 +503,131 @@ func longMultipartBody(t *testing.T) ([]byte, string) {
 	}
 	return []byte(buffer.String()), writer.FormDataContentType()
 }
+
+// TestUnlimitedMaxPagesAcceptsADocumentOverTheDefaultLimit covers the only way an
+// operator can reach service.countPages' "MaxPages == 0 means no page limit"
+// branch. It has to go through config.Load: the defect lives in the env parser, so
+// a hand built config would hide it. t.Setenv forbids t.Parallel.
+func TestUnlimitedMaxPagesAcceptsADocumentOverTheDefaultLimit(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	address := listener.Addr().String()
+
+	t.Setenv("PII_MASKER_STORAGE_DIR", t.TempDir())
+	t.Setenv("PII_MASKER_ENABLE_EMBEDDED_UPSTAGE_MOCK", "true")
+	t.Setenv("PII_MASKER_UPSTAGE_BASE_URL", "")
+	t.Setenv("PII_MASKER_ADDR", address)
+	t.Setenv("PII_MASKER_MAX_PAGES", "0")
+
+	cfg, err := config.Load()
+	if err != nil {
+		listener.Close()
+		t.Fatalf("load config: %v", err)
+	}
+
+	application, err := app.New(cfg)
+	if err != nil {
+		listener.Close()
+		t.Fatalf("new app: %v", err)
+	}
+	t.Cleanup(application.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- application.Serve(ctx, listener)
+	}()
+
+	// One page more than the default limit of 20, which is what an unset
+	// PII_MASKER_MAX_PAGES would apply.
+	const pages = 21
+	body, contentType := pdfUploadBody(t, blankPDF(200, 100, pages))
+	response, err := http.Post("http://"+address+"/v1/jobs", contentType, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post /v1/jobs: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusAccepted {
+		raw, _ := io.ReadAll(response.Body)
+		t.Fatalf("a %d page upload was refused with status %d while max pages was %d: %s",
+			pages, response.StatusCode, cfg.Limits.MaxPages, raw)
+	}
+	var metadata core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+		t.Fatalf("decode job metadata: %v", err)
+	}
+	if metadata.Input.Pages != pages {
+		t.Fatalf("unexpected page count %d", metadata.Input.Pages)
+	}
+
+	cancel()
+	if err := waitForServe(t, serveErr); err != nil {
+		t.Fatalf("serve returned %v", err)
+	}
+}
+
+func pdfUploadBody(t *testing.T, content []byte) ([]byte, string) {
+	t.Helper()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "sample.pdf")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write(content); err != nil {
+		t.Fatalf("write form file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	return body.Bytes(), writer.FormDataContentType()
+}
+
+// blankPDF writes the smallest PDF pdfcpu will read in relaxed validation mode:
+// a catalog, a page tree holding the requested number of empty pages, and an xref
+// table. The pages share one empty content stream.
+func blankPDF(width, height, pages int) []byte {
+	kids := make([]string, 0, pages)
+	for index := range pages {
+		kids = append(kids, strconv.Itoa(firstPageObject+index)+" 0 R")
+	}
+	objects := []string{
+		"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+		"2 0 obj\n<< /Type /Pages /Kids [" + strings.Join(kids, " ") + "] /Count " + strconv.Itoa(pages) + " >>\nendobj\n",
+		"3 0 obj\n<< /Length 0 >>\nstream\n\nendstream\nendobj\n",
+	}
+	for index := range pages {
+		objects = append(objects, strconv.Itoa(firstPageObject+index)+" 0 obj\n"+
+			"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 "+strconv.Itoa(width)+" "+strconv.Itoa(height)+"] /Contents 3 0 R >>\n"+
+			"endobj\n")
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("%PDF-1.4\n")
+	offsets := make([]int, 0, len(objects))
+	for _, object := range objects {
+		offsets = append(offsets, buf.Len())
+		buf.WriteString(object)
+	}
+
+	// Object 0 is the free head of the table, so the size is one past the last object.
+	size := strconv.Itoa(len(objects) + 1)
+	xrefOffset := buf.Len()
+	buf.WriteString("xref\n0 " + size + "\n")
+	buf.WriteString("0000000000 65535 f \n")
+	for _, offset := range offsets {
+		buf.WriteString(fmt.Sprintf("%010d 00000 n \n", offset))
+	}
+	buf.WriteString("trailer\n<< /Size " + size + " /Root 1 0 R >>\n")
+	buf.WriteString("startxref\n" + strconv.Itoa(xrefOffset) + "\n")
+	buf.WriteString("%%EOF\n")
+	return buf.Bytes()
+}
+
+// The catalog, the page tree and the shared content stream take objects 1 to 3.
+const firstPageObject = 4

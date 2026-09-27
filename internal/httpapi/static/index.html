@@ -866,7 +866,9 @@
       configPills.innerHTML = '';
       const pills = [
         `최대 파일 크기 ${formatBytes(payload.limits.max_file_size_bytes)}`,
-        `최대 페이지 ${payload.limits.max_pages}`,
+        // max_pages is 0 when the operator turned the page limit off, which would
+        // otherwise read as "0 pages allowed".
+        `최대 페이지 ${payload.limits.max_pages > 0 ? payload.limits.max_pages : '제한 없음'}`,
         `지원 형식 ${payload.supported_types.join(', ')}`,
       ];
       pills.forEach((text) => {

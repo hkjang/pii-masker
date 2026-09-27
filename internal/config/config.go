@@ -144,8 +144,10 @@ func Load() (Config, error) {
 			Verbose:    envBool("PII_MASKER_DEFAULT_VERBOSE", false),
 		},
 		Limits: LimitsConfig{
-			MaxFileSizeBytes:  int64(envInt("PII_MASKER_MAX_FILE_SIZE_MB", defaultMaxFileSizeMB)) * 1024 * 1024,
-			MaxPages:          envInt("PII_MASKER_MAX_PAGES", defaultMaxPages),
+			MaxFileSizeBytes: int64(envInt("PII_MASKER_MAX_FILE_SIZE_MB", defaultMaxFileSizeMB)) * 1024 * 1024,
+			// Alone in this group MaxPages accepts an explicit 0, because
+			// service.countPages reads a non-positive limit as "no page limit".
+			MaxPages:          envNonNegativeInt("PII_MASKER_MAX_PAGES", defaultMaxPages),
 			MaxConcurrentJobs: envInt("PII_MASKER_MAX_CONCURRENT_JOBS", defaultMaxConcurrentJobs),
 			MaxConcurrentSync: envInt("PII_MASKER_MAX_CONCURRENT_SYNC", defaultMaxConcurrentSync),
 			SyncQueueWait:     time.Duration(envNonNegativeInt("PII_MASKER_SYNC_QUEUE_WAIT_SECONDS", defaultSyncQueueWaitSeconds)) * time.Second,
