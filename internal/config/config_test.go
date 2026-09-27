@@ -142,3 +142,67 @@ func TestLoadServerTimeoutRejectsNonPositiveValues(t *testing.T) {
 		t.Fatalf("unexpected shutdown timeout %s", cfg.Server.ShutdownTimeout)
 	}
 }
+
+// service.countPages reads MaxPages as "0 means no page limit", so an operator has
+// to be able to set that. The other limits in this group have no meaning at 0 --
+// a 0 byte upload cap or 0 concurrent jobs would take the service offline -- so
+// they keep falling back to their defaults.
+func TestLoadMaxPagesAcceptsZeroAsUnlimited(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{name: "unset keeps the default", value: "", want: defaultMaxPages},
+		{name: "zero turns the page limit off", value: "0", want: 0},
+		{name: "positive value is used", value: "5", want: 5},
+		{name: "negative value falls back", value: "-1", want: defaultMaxPages},
+		{name: "unparsable value falls back", value: "abc", want: defaultMaxPages},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv("PII_MASKER_STORAGE_DIR", t.TempDir())
+			if testCase.value != "" {
+				t.Setenv("PII_MASKER_MAX_PAGES", testCase.value)
+			}
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+
+			if cfg.Limits.MaxPages != testCase.want {
+				t.Fatalf("unexpected max pages %d, want %d", cfg.Limits.MaxPages, testCase.want)
+			}
+		})
+	}
+}
+
+// Only MaxPages gained the explicit 0; these share the same parser and must not
+// have picked it up, because none of them can do any work at 0.
+func TestLoadRejectsZeroForLimitsThatWouldDisableTheService(t *testing.T) {
+	t.Setenv("PII_MASKER_STORAGE_DIR", t.TempDir())
+	t.Setenv("PII_MASKER_MAX_FILE_SIZE_MB", "0")
+	t.Setenv("PII_MASKER_MAX_CONCURRENT_JOBS", "0")
+	t.Setenv("PII_MASKER_MAX_CONCURRENT_SYNC", "0")
+	t.Setenv("PII_MASKER_DEFAULT_TIMEOUT_SECONDS", "0")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	if cfg.Limits.MaxFileSizeBytes != int64(defaultMaxFileSizeMB)*1024*1024 {
+		t.Fatalf("unexpected max file size %d", cfg.Limits.MaxFileSizeBytes)
+	}
+	if cfg.Limits.MaxConcurrentJobs != defaultMaxConcurrentJobs {
+		t.Fatalf("unexpected max concurrent jobs %d", cfg.Limits.MaxConcurrentJobs)
+	}
+	if cfg.Limits.MaxConcurrentSync != defaultMaxConcurrentSync {
+		t.Fatalf("unexpected max concurrent sync %d", cfg.Limits.MaxConcurrentSync)
+	}
+	if cfg.Upstage.Timeout != time.Duration(defaultTimeoutSeconds)*time.Second {
+		t.Fatalf("unexpected upstream timeout %s", cfg.Upstage.Timeout)
+	}
+}
