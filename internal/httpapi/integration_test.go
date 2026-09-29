@@ -1215,6 +1215,59 @@ func TestExpiredJobFilesArePurgedOnStartup(t *testing.T) {
 	}
 }
 
+func TestOverflowingRetentionFallsBackAndPurgesExpiredJobFiles(t *testing.T) {
+	var jobsDir string
+	now := time.Now().UTC()
+	serverURL, _ := startAppServerWithConfig(t, func(cfg *config.Config) {
+		for _, key := range []string{
+			"READ_HEADER_TIMEOUT_SECONDS", "IDLE_TIMEOUT_SECONDS", "SHUTDOWN_TIMEOUT_SECONDS",
+			"DEFAULT_TIMEOUT_SECONDS", "SYNC_QUEUE_WAIT_SECONDS", "ENABLE_EMBEDDED_UPSTAGE_MOCK",
+			"PUBLIC_BASE_URL", "ALLOW_HOSTS",
+		} {
+			t.Setenv("PII_MASKER_"+key, "")
+		}
+		t.Setenv("PII_MASKER_STORAGE_DIR", cfg.Storage.RootDir)
+		t.Setenv("PII_MASKER_UPSTAGE_BASE_URL", cfg.Upstage.BaseURL)
+		t.Setenv("PII_MASKER_JOB_RETENTION_HOURS", "2562048")
+		loaded, err := config.Load()
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		*cfg = loaded
+		jobsDir = filepath.Join(cfg.Storage.RootDir, "jobs")
+		seedStoredJobFiles(t, jobsDir, "stale-job", now.Add(-48*time.Hour))
+		seedStoredJobFiles(t, jobsDir, "fresh-job", now.Add(-time.Minute))
+	})
+
+	waitForCondition(t, "the expired job directory to be removed", func() bool {
+		_, err := os.Stat(filepath.Join(jobsDir, "stale-job"))
+		return os.IsNotExist(err)
+	})
+
+	staleResponse, err := http.Get(serverURL + "/v1/jobs/stale-job")
+	if err != nil {
+		t.Fatalf("get expired job: %v", err)
+	}
+	defer staleResponse.Body.Close()
+	if staleResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected the expired job to be unknown, got %d", staleResponse.StatusCode)
+	}
+
+	for _, name := range []string{"job.json", "input_sample.png", "output_sample_masked.png"} {
+		if _, err := os.Stat(filepath.Join(jobsDir, "fresh-job", name)); err != nil {
+			t.Fatalf("expected recent job file %s to be kept: %v", name, err)
+		}
+	}
+	freshResponse, err := http.Get(serverURL + "/v1/jobs/fresh-job")
+	if err != nil {
+		t.Fatalf("get recent job: %v", err)
+	}
+	defer freshResponse.Body.Close()
+	if freshResponse.StatusCode != http.StatusOK {
+		t.Fatalf("expected the recent job to be kept, got %d", freshResponse.StatusCode)
+	}
+}
+
 // TestHistoryCapsTheNumberOfReturnedJobs pins the page size of the history listing:
 // without a cap a single request could ask the server to clone and serialize every
 // job the store still holds.

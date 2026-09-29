@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -204,5 +206,77 @@ func TestLoadRejectsZeroForLimitsThatWouldDisableTheService(t *testing.T) {
 	}
 	if cfg.Upstage.Timeout != time.Duration(defaultTimeoutSeconds)*time.Second {
 		t.Fatalf("unexpected upstream timeout %s", cfg.Upstage.Timeout)
+	}
+}
+
+func TestLoadDurationBounds(t *testing.T) {
+	settings := []struct {
+		key            string
+		unit, fallback time.Duration
+		allowZero      bool
+		get            func(Config) time.Duration
+	}{
+		{"READ_HEADER_TIMEOUT_SECONDS", time.Second, 15 * time.Second, false, func(c Config) time.Duration { return c.Server.ReadHeaderTimeout }},
+		{"IDLE_TIMEOUT_SECONDS", time.Second, 60 * time.Second, false, func(c Config) time.Duration { return c.Server.IdleTimeout }},
+		{"SHUTDOWN_TIMEOUT_SECONDS", time.Second, 45 * time.Second, false, func(c Config) time.Duration { return c.Server.ShutdownTimeout }},
+		{"DEFAULT_TIMEOUT_SECONDS", time.Second, 30 * time.Second, false, func(c Config) time.Duration { return c.Upstage.Timeout }},
+		{"SYNC_QUEUE_WAIT_SECONDS", time.Second, 10 * time.Second, true, func(c Config) time.Duration { return c.Limits.SyncQueueWait }},
+		{"JOB_RETENTION_HOURS", time.Hour, 24 * time.Hour, true, func(c Config) time.Duration { return c.Storage.JobRetention }},
+	}
+	t.Setenv("PII_MASKER_STORAGE_DIR", t.TempDir())
+	t.Setenv("PII_MASKER_UPSTAGE_BASE_URL", "")
+	t.Setenv("PII_MASKER_ENABLE_EMBEDDED_UPSTAGE_MOCK", "")
+	for _, setting := range settings {
+		t.Setenv("PII_MASKER_"+setting.key, "")
+	}
+	for _, setting := range settings {
+		t.Run(setting.key, func(t *testing.T) {
+			maximum := int64(9223372036)
+			wrapsPositive := "18446744074"
+			if setting.unit == time.Hour {
+				maximum = 2562047
+				wrapsPositive = "5124096"
+			}
+			zero := setting.fallback
+			if setting.allowZero {
+				zero = 0
+			}
+			cases := []struct {
+				name, value string
+				want        time.Duration
+			}{
+				{"unset", "", setting.fallback},
+				{"empty", "", setting.fallback},
+				{"whitespace", " \t ", setting.fallback},
+				{"negative", "-1", setting.fallback},
+				{"invalid", "abc", setting.fallback},
+				{"positive", "7", 7 * setting.unit},
+				{"trimmed", " \t7 ", 7 * setting.unit},
+				{"zero", "0", zero},
+				{"maximum", strconv.FormatInt(maximum, 10), time.Duration(maximum) * setting.unit},
+				{"above maximum", strconv.FormatInt(maximum+1, 10), setting.fallback},
+				{"positive wraparound", wrapsPositive, setting.fallback},
+				{"int64 maximum", "9223372036854775807", setting.fallback},
+				{"beyond int64", "9223372036854775808", setting.fallback},
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					key := "PII_MASKER_" + setting.key
+					t.Setenv(key, tc.value)
+					if tc.name == "unset" {
+						if err := os.Unsetenv(key); err != nil {
+							t.Fatal(err)
+						}
+					}
+					cfg, err := Load()
+					if err != nil {
+						t.Fatalf("load: %v", err)
+					}
+					if got := setting.get(cfg); got != tc.want {
+						t.Fatalf("%s=%q: got %s, want %s", key, tc.value, got, tc.want)
+					}
+				})
+			}
+		})
 	}
 }

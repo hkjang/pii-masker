@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -137,7 +138,7 @@ func Load() (Config, error) {
 			AuthMode:   normalizeAuthMode(envOrDefault("PII_MASKER_UPSTAGE_AUTH_MODE", "bearer")),
 			AuthToken:  strings.TrimSpace(os.Getenv("PII_MASKER_UPSTAGE_AUTH_TOKEN")),
 			AllowHosts: normalizeAllowHosts(os.Getenv("PII_MASKER_ALLOW_HOSTS"), parsedBaseURL),
-			Timeout:    time.Duration(envInt("PII_MASKER_DEFAULT_TIMEOUT_SECONDS", defaultTimeoutSeconds)) * time.Second,
+			Timeout:    envSeconds("PII_MASKER_DEFAULT_TIMEOUT_SECONDS", defaultTimeoutSeconds*time.Second),
 			Model:      envOrDefault("PII_MASKER_DEFAULT_MODEL", defaultModel),
 			Lang:       normalizePIILang(envOrDefault("PII_MASKER_DEFAULT_LANG", defaultLang)),
 			Schema:     normalizePIISchema(envOrDefault("PII_MASKER_DEFAULT_SCHEMA", defaultSchema)),
@@ -150,12 +151,12 @@ func Load() (Config, error) {
 			MaxPages:          envNonNegativeInt("PII_MASKER_MAX_PAGES", defaultMaxPages),
 			MaxConcurrentJobs: envInt("PII_MASKER_MAX_CONCURRENT_JOBS", defaultMaxConcurrentJobs),
 			MaxConcurrentSync: envInt("PII_MASKER_MAX_CONCURRENT_SYNC", defaultMaxConcurrentSync),
-			SyncQueueWait:     time.Duration(envNonNegativeInt("PII_MASKER_SYNC_QUEUE_WAIT_SECONDS", defaultSyncQueueWaitSeconds)) * time.Second,
+			SyncQueueWait:     envDuration("PII_MASKER_SYNC_QUEUE_WAIT_SECONDS", defaultSyncQueueWaitSeconds*time.Second, time.Second, true),
 			SupportedMIMEs:    []string{"application/pdf", "image/png", "image/jpeg"},
 		},
 		Storage: StorageConfig{
 			RootDir:      rootDir,
-			JobRetention: time.Duration(envNonNegativeInt("PII_MASKER_JOB_RETENTION_HOURS", defaultJobRetentionHours)) * time.Hour,
+			JobRetention: envDuration("PII_MASKER_JOB_RETENTION_HOURS", defaultJobRetentionHours*time.Hour, time.Hour, true),
 		},
 		Debug: DebugConfig{
 			EnableDebug: envBool("PII_MASKER_ENABLE_DEBUG", false),
@@ -288,7 +289,19 @@ func envInt(key string, fallback int) int {
 // server from connections that never finish, so a non-positive value falls back
 // to the default instead of disabling them.
 func envSeconds(key string, fallback time.Duration) time.Duration {
-	return time.Duration(envInt(key, int(fallback/time.Second))) * time.Second
+	return envDuration(key, fallback, time.Second, false)
+}
+
+// envDuration reads whole units using int64 on every architecture. Check the
+// bound before multiplication: overflow can wrap to positive durations too.
+// Only callers whose policy gives zero a meaning should set allowZero.
+func envDuration(key string, fallback, unit time.Duration, allowZero bool) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 || (!allowZero && parsed == 0) || parsed > math.MaxInt64/int64(unit) {
+		return fallback
+	}
+	return time.Duration(parsed) * unit
 }
 
 // envNonNegativeInt accepts an explicit 0, which callers use to turn a limit off.

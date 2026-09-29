@@ -84,6 +84,8 @@ PDF 마스킹은 페이지 위에 검은 사각형을 덧그리는 방식이라 
 
 ## 환경 변수
 
+초·시간 단위의 시간 설정 여섯 개는 `time.Duration`의 표현 범위(초: 9223372036, 시간: 2562047)를 넘으면 각 설정의 기본값으로 복귀합니다.
+
 - `PII_MASKER_ADDR`
 - `PII_MASKER_PUBLIC_BASE_URL`
 - `PII_MASKER_STORAGE_DIR`
