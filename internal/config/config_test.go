@@ -209,6 +209,59 @@ func TestLoadRejectsZeroForLimitsThatWouldDisableTheService(t *testing.T) {
 	}
 }
 
+// The MiB multiplication has the same overflow shape as the duration settings:
+// an out of range value must come back as the default instead of a wrapped size,
+// because every upload path compares against MaxFileSizeBytes.
+func TestLoadMaxFileSizeBounds(t *testing.T) {
+	const (
+		key         = "PII_MASKER_MAX_FILE_SIZE_MB"
+		mebibyte    = int64(1024 * 1024)
+		maximumMB   = int64(9223372036854775807) / mebibyte // 8796093022207
+		defaultSize = int64(defaultMaxFileSizeMB) * mebibyte
+	)
+	cases := []struct {
+		name, value string
+		want        int64
+	}{
+		{"unset", "", defaultSize},
+		{"empty", "", defaultSize},
+		{"whitespace", " \t ", defaultSize},
+		{"one mebibyte", "1", mebibyte},
+		{"trimmed", " \t1 ", mebibyte},
+		{"zero", "0", defaultSize},
+		{"negative", "-1", defaultSize},
+		{"invalid", "abc", defaultSize},
+		{"maximum", strconv.FormatInt(maximumMB, 10), maximumMB * mebibyte},
+		{"above maximum wraps negative", strconv.FormatInt(maximumMB+1, 10), defaultSize},
+		{"positive wraparound", "17592186044417", defaultSize},
+		{"int64 maximum", "9223372036854775807", defaultSize},
+		{"beyond int64", "9223372036854775808", defaultSize},
+	}
+
+	t.Setenv("PII_MASKER_STORAGE_DIR", t.TempDir())
+	t.Setenv(key, "")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(key, tc.value)
+			if tc.name == "unset" {
+				if err := os.Unsetenv(key); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.Limits.MaxFileSizeBytes <= 0 {
+				t.Fatalf("%s=%q: max file size %d is not a usable limit", key, tc.value, cfg.Limits.MaxFileSizeBytes)
+			}
+			if cfg.Limits.MaxFileSizeBytes != tc.want {
+				t.Fatalf("%s=%q: got %d, want %d", key, tc.value, cfg.Limits.MaxFileSizeBytes, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadDurationBounds(t *testing.T) {
 	settings := []struct {
 		key            string
