@@ -570,6 +570,67 @@ func TestUnlimitedMaxPagesAcceptsADocumentOverTheDefaultLimit(t *testing.T) {
 	}
 }
 
+// An out of range PII_MASKER_MAX_FILE_SIZE_MB used to wrap the byte limit negative,
+// and the three upload guards that read it then refused every upload that was not
+// empty. Only config.Load can produce that value, so this goes through the real
+// wiring. t.Setenv forbids t.Parallel.
+func TestOverflowingMaxFileSizeStillAcceptsAnUpload(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	address := listener.Addr().String()
+
+	t.Setenv("PII_MASKER_STORAGE_DIR", t.TempDir())
+	t.Setenv("PII_MASKER_ENABLE_EMBEDDED_UPSTAGE_MOCK", "true")
+	t.Setenv("PII_MASKER_UPSTAGE_BASE_URL", "")
+	t.Setenv("PII_MASKER_ADDR", address)
+	// 8796093022208 MiB is exactly 2^63 bytes, the smallest value that wraps.
+	t.Setenv("PII_MASKER_MAX_FILE_SIZE_MB", "8796093022208")
+
+	cfg, err := config.Load()
+	if err != nil {
+		listener.Close()
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Limits.MaxFileSizeBytes <= 0 {
+		listener.Close()
+		t.Fatalf("max file size %d is not a usable limit", cfg.Limits.MaxFileSizeBytes)
+	}
+
+	application, err := app.New(cfg)
+	if err != nil {
+		listener.Close()
+		t.Fatalf("new app: %v", err)
+	}
+	t.Cleanup(application.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- application.Serve(ctx, listener)
+	}()
+
+	body, contentType := pngUploadBody(t)
+	response, err := http.Post("http://"+address+"/v1/mask", contentType, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(response.Body)
+		t.Fatalf("a %d byte upload was refused with status %d while the size limit was %d: %s",
+			len(body), response.StatusCode, cfg.Limits.MaxFileSizeBytes, raw)
+	}
+
+	cancel()
+	if err := waitForServe(t, serveErr); err != nil {
+		t.Fatalf("serve returned %v", err)
+	}
+}
+
 func pdfUploadBody(t *testing.T, content []byte) ([]byte, string) {
 	t.Helper()
 

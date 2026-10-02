@@ -145,7 +145,7 @@ func Load() (Config, error) {
 			Verbose:    envBool("PII_MASKER_DEFAULT_VERBOSE", false),
 		},
 		Limits: LimitsConfig{
-			MaxFileSizeBytes: int64(envInt("PII_MASKER_MAX_FILE_SIZE_MB", defaultMaxFileSizeMB)) * 1024 * 1024,
+			MaxFileSizeBytes: envMebibytes("PII_MASKER_MAX_FILE_SIZE_MB", defaultMaxFileSizeMB),
 			// Alone in this group MaxPages accepts an explicit 0, because
 			// service.countPages reads a non-positive limit as "no page limit".
 			MaxPages:          envNonNegativeInt("PII_MASKER_MAX_PAGES", defaultMaxPages),
@@ -302,6 +302,20 @@ func envDuration(key string, fallback, unit time.Duration, allowZero bool) time.
 		return fallback
 	}
 	return time.Duration(parsed) * unit
+}
+
+// envMebibytes reads a size given in whole mebibytes using int64 on every
+// architecture. Check the bound before multiplication: a wrapped size would be
+// negative or far smaller than asked for, and the upload guards that compare
+// against it would then refuse every upload instead of raising the cap.
+func envMebibytes(key string, fallbackMB int64) int64 {
+	const mebibyte = 1024 * 1024
+	value := strings.TrimSpace(os.Getenv(key))
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 || parsed > math.MaxInt64/mebibyte {
+		return fallbackMB * mebibyte
+	}
+	return parsed * mebibyte
 }
 
 // envNonNegativeInt accepts an explicit 0, which callers use to turn a limit off.
