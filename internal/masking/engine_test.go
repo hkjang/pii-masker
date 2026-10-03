@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"image/jpeg"
 	"image/png"
 	"testing"
 )
@@ -256,6 +257,47 @@ func TestMaskImageFileFailsWhenARegionMissesTheImage(t *testing.T) {
 	}
 }
 
+// The encoded bytes have to match the MIME type the response advertises: the same
+// mimeType value becomes Output.MIMEType and the result download is served with
+// X-Content-Type-Options: nosniff, so a browser handed PNG bytes labelled
+// image/jpeg renders nothing at all.
+func TestMaskImageFileEncodesTheFormatTheMIMETypeAdvertises(t *testing.T) {
+	t.Parallel()
+
+	regions := []Region{{PageNumber: 1, Polygon: [4][2]float64{{10, 10}, {50, 10}, {50, 30}, {10, 30}}}}
+	cases := []struct {
+		name     string
+		content  []byte
+		mimeType string
+		want     string
+	}{
+		{name: "declared png with png bytes stays png", content: whitePNG(t, 100, 100), mimeType: "image/png", want: "png"},
+		{name: "declared png with jpeg bytes becomes png", content: whiteJPEG(t, 100, 100), mimeType: "image/png", want: "png"},
+		{name: "declared jpeg with png bytes becomes jpeg", content: whitePNG(t, 100, 100), mimeType: "image/jpeg", want: "jpeg"},
+		{name: "declared jpeg with jpeg bytes stays jpeg", content: whiteJPEG(t, 100, 100), mimeType: "image/jpeg", want: "jpeg"},
+		{name: "no declared type follows the decoded png format", content: whitePNG(t, 100, 100), mimeType: "", want: "png"},
+		{name: "no declared type falls back to jpeg for other formats", content: whiteJPEG(t, 100, 100), mimeType: "", want: "jpeg"},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			masked, err := MaskImageFile(testCase.content, testCase.mimeType, regions, nil)
+			if err != nil {
+				t.Fatalf("mask image: %v", err)
+			}
+			_, format, err := image.Decode(bytes.NewReader(masked))
+			if err != nil {
+				t.Fatalf("decode masked image: %v", err)
+			}
+			if format != testCase.want {
+				t.Fatalf("mimeType %q produced %s bytes, want %s", testCase.mimeType, format, testCase.want)
+			}
+		})
+	}
+}
+
 func TestMaskPDFFileFailsForRegionsOnMissingPages(t *testing.T) {
 	t.Parallel()
 
@@ -273,6 +315,18 @@ func whitePNG(t *testing.T, width, height int) []byte {
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
 		t.Fatalf("png encode: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func whiteJPEG(t *testing.T, width, height int) []byte {
+	t.Helper()
+
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	draw.Draw(img, img.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, nil); err != nil {
+		t.Fatalf("jpeg encode: %v", err)
 	}
 	return buf.Bytes()
 }

@@ -1498,6 +1498,55 @@ func TestMaskRejectsUpstreamHostOutsideAllowList(t *testing.T) {
 	}
 }
 
+// A browser labels an upload from its file extension, so a PNG saved as ".jpg" is
+// declared image/jpeg. The declared type is what Output.MIMEType and the result
+// download's Content-Type report, and that download carries
+// X-Content-Type-Options: nosniff, so the bytes in the result part have to decode
+// as the format the metadata advertises rather than as the uploaded encoding.
+//
+// The embedded mock rejects anything but PDF and PNG upstream, so this drives a
+// local handler shaped like the mock's payload instead.
+func TestMaskEncodesTheResultAsTheAdvertisedMIMEType(t *testing.T) {
+	t.Parallel()
+
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"mock-pii","model":"pii","result":{"apiVersion":"1.1","documentType":"pii","confidence":0.99,` +
+			`"fields":[{"key":"개인정보.이름","value":"홍길동","confidence":0.99,"boundingBoxes":[{"page":1,"vertices":` +
+			`[{"x":40,"y":20},{"x":112,"y":20},{"x":112,"y":36},{"x":40,"y":36}]}]}],` +
+			`"metadata":{"pages":[{"page":1,"width":400,"height":200}]}}}`))
+	})
+	serverURL, _ := startAppServerWithUpstream(t, upstream, nil)
+
+	// The part declares image/jpeg while carrying real PNG bytes.
+	requestBody, contentType := buildMultipartBodyWithFilenameParam(t, `filename="sample.jpg"`, "image/jpeg", createBlankPNG(t, 400, 200))
+	response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+
+	metadata, fileBytes := parseMultipartMaskResponse(t, response)
+	if metadata.Status != "completed" {
+		t.Fatalf("expected completed status, got %q (%#v)", metadata.Status, metadata.Error)
+	}
+	if metadata.Output.MIMEType != "image/jpeg" {
+		t.Fatalf("unexpected advertised output mime: %s", metadata.Output.MIMEType)
+	}
+	_, format, err := image.Decode(bytes.NewReader(fileBytes))
+	if err != nil {
+		t.Fatalf("decode masked result: %v", err)
+	}
+	if format != "jpeg" {
+		t.Fatalf("the response advertises %s but the result bytes decode as %s", metadata.Output.MIMEType, format)
+	}
+}
+
 func startAppServer(t *testing.T) string {
 	t.Helper()
 
