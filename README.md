@@ -14,7 +14,7 @@
   - 응답은 `multipart/mixed`
   - 1번 파트: JSON 메타데이터
   - 2번 파트: 마스킹된 파일 바이너리
-  - 이미지 결과는 업로드가 선언한 형식(`Content-Type`)으로 다시 인코딩하므로, 파일 내용이 선언과 다른 형식이어도 `output.mime_type`·결과 다운로드의 `Content-Type`·파일 이름 확장자가 실제 바이트와 어긋나지 않습니다
+  - 이미지 결과는 업로드가 선언한 형식(`Content-Type`)으로 다시 인코딩하므로, 파일 내용이 선언과 다른 형식이어도 `output.mime_type`·결과 다운로드의 `Content-Type`이 실제 바이트와 어긋나지 않습니다. `output.file_name`은 업로드한 파일 이름을 그대로 쓰므로, 이름의 확장자는 선언한 형식과 다를 수 있습니다
 - `POST /v1/jobs`
   - 비동기 작업 생성
 - `GET /v1/jobs/{job_id}`

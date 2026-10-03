@@ -496,10 +496,11 @@ func MaskImageFile(content []byte, mimeType string, regions []Region, pageSizes 
 	}
 
 	// The declared type wins over the decoded format: the same mimeType is what the
-	// caller reports as Output.MIMEType and as the result download's Content-Type,
-	// and it also picks the masked file name's extension. That download is served
-	// with nosniff, so bytes in any other encoding simply do not render. The decoded
-	// format stays as the fallback for callers that pass no type at all.
+	// caller reports as Output.MIMEType and as the result download's Content-Type.
+	// That download is served with nosniff, so bytes in any other encoding simply do
+	// not render. The masked file name keeps the uploaded name, so its extension is
+	// not derived from this type and can still disagree with it. The decoded format
+	// stays as the fallback for callers that pass no type at all.
 	var buf bytes.Buffer
 	lowerMIME := strings.ToLower(mimeType)
 	switch {
