@@ -1547,6 +1547,80 @@ func TestMaskEncodesTheResultAsTheAdvertisedMIMEType(t *testing.T) {
 	}
 }
 
+// The bundled Playground labels an upload from its file extension, so a JPEG saved
+// as ".png" is declared image/png. The inference endpoint only takes PDF and PNG,
+// which is why the client re-encodes images on the way out, and that decision has
+// to follow the bytes rather than the label the client attached to them.
+//
+// This drives the whole production path - config, app.New, the real HTTP handler and
+// the upstage client - and inspects what the upstream actually received.
+func TestMaskSendsPNGBytesUpstreamForAJPEGDeclaredAsPNG(t *testing.T) {
+	t.Parallel()
+
+	var upstreamBytes []byte
+	upstreamMIME := ""
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reader, err := r.MultipartReader()
+		if err != nil {
+			t.Errorf("multipart reader: %v", err)
+			return
+		}
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Errorf("next part: %v", err)
+				return
+			}
+			if part.FormName() != "document" {
+				continue
+			}
+			upstreamMIME = part.Header.Get("Content-Type")
+			upstreamBytes, err = io.ReadAll(part)
+			if err != nil {
+				t.Errorf("read document part: %v", err)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"mock-pii","model":"pii","result":{"apiVersion":"1.1","documentType":"pii","confidence":0.99,` +
+			`"fields":[{"key":"개인정보.이름","value":"홍길동","confidence":0.99,"boundingBoxes":[{"page":1,"vertices":` +
+			`[{"x":40,"y":20},{"x":112,"y":20},{"x":112,"y":36},{"x":40,"y":36}]}]}],` +
+			`"metadata":{"pages":[{"page":1,"width":400,"height":200}]}}}`))
+	})
+	serverURL, _ := startAppServerWithUpstream(t, upstream, nil)
+
+	// The part declares image/png while carrying real JPEG bytes.
+	requestBody, contentType := buildMultipartBodyWithFilenameParam(t, `filename="photo.png"`, "image/png", createBlankJPEG(t, 400, 200))
+	response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	metadata, _ := parseMultipartMaskResponse(t, response)
+	if metadata.Status != "completed" {
+		t.Fatalf("expected completed status, got %q (%#v)", metadata.Status, metadata.Error)
+	}
+
+	if !strings.HasPrefix(upstreamMIME, "image/png") {
+		t.Fatalf("upstream content type is %q, want image/png", upstreamMIME)
+	}
+	_, format, err := image.Decode(bytes.NewReader(upstreamBytes))
+	if err != nil {
+		t.Fatalf("decode the payload the upstream received: %v", err)
+	}
+	if format != "png" {
+		t.Fatalf("the upstream part declares %s but its bytes decode as %s", upstreamMIME, format)
+	}
+}
+
 func startAppServer(t *testing.T) string {
 	t.Helper()
 
