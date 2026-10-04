@@ -28,6 +28,18 @@ func DecodeImage(content []byte) (image.Image, string, error) {
 	return image.Decode(bytes.NewReader(content))
 }
 
+// DetectImageFormat reports the registered format of content from its header alone,
+// so a caller that only needs to know the encoding does not pay for a pixel buffer.
+// The declared MIME type of an upload is whatever the client labelled it with, so it
+// is not an answer to this question.
+func DetectImageFormat(content []byte) (string, error) {
+	_, format, err := image.DecodeConfig(bytes.NewReader(content))
+	if err != nil {
+		return "", fmt.Errorf("failed to inspect image header: %w", err)
+	}
+	return format, nil
+}
+
 // ValidateImageDimensions rejects images whose header declares more pixels than
 // MaxImagePixels allows, without decoding the pixel data.
 func ValidateImageDimensions(content []byte) error {

@@ -180,9 +180,9 @@ func (c *Client) ParseDocument(ctx context.Context, attachment document.Attachme
 		elapsed := time.Since(startedAt)
 		callErr := newCallError(
 			"upstream_prepare_failed",
-			"JPG/JPEG 파일을 PII 추론용 형식으로 변환하지 못했습니다.",
+			"이미지 파일을 PII 추론용 PNG 형식으로 변환하지 못했습니다.",
 			err.Error(),
-			"손상되지 않은 JPG/JPEG 파일인지 확인한 뒤 다시 시도하세요.",
+			"손상되지 않은 PNG/JPG/JPEG 파일인지 확인한 뒤 다시 시도하세요.",
 			c.config.BaseURL,
 			0,
 			false,
@@ -333,28 +333,56 @@ func (c *Client) performParseRequest(ctx context.Context, originalAttachment doc
 	}, response.StatusCode, nil
 }
 
+// prepareUpstreamAttachment rewrites an image upload into the PNG the inference
+// endpoint accepts, which together with PDF is all it takes.
+//
+// The decision is made from the content, not from attachment.MIMEType: that type is
+// whatever the client labelled the upload with - the bundled Playground derives it
+// from the file extension - so a JPEG saved as ".png" declares image/png and would
+// otherwise travel verbatim under a Content-Type the endpoint rejects. A file that
+// already decodes as PNG keeps its bytes and only has its declared type corrected,
+// and only the header is read to establish that, so the common case allocates no
+// pixel buffer.
+//
+// The returned value is the upstream copy alone. The caller keeps the original
+// attachment, which is what the masked result is rendered from and what the response
+// metadata describes.
 func prepareUpstreamAttachment(attachment document.Attachment) (document.Attachment, error) {
-	if !strings.EqualFold(strings.TrimSpace(attachment.MIMEType), "image/jpeg") {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(attachment.MIMEType)), "image/") {
 		return attachment, nil
+	}
+
+	format, err := document.DetectImageFormat(attachment.Content)
+	if err != nil {
+		return document.Attachment{}, err
+	}
+	if format == "png" {
+		return asUpstreamPNG(attachment, attachment.Content), nil
 	}
 
 	imageValue, _, err := document.DecodeImage(attachment.Content)
 	if err != nil {
-		return document.Attachment{}, fmt.Errorf("failed to decode jpeg: %w", err)
+		return document.Attachment{}, fmt.Errorf("failed to decode the uploaded %s image: %w", format, err)
 	}
 
 	var buffer bytes.Buffer
 	if err := png.Encode(&buffer, imageValue); err != nil {
 		return document.Attachment{}, fmt.Errorf("failed to encode png: %w", err)
 	}
+	return asUpstreamPNG(attachment, buffer.Bytes()), nil
+}
 
+// asUpstreamPNG labels content as the PNG it is. The name follows the type because
+// some endpoints read the format from the file extension of the part rather than from
+// its Content-Type.
+func asUpstreamPNG(attachment document.Attachment, content []byte) document.Attachment {
 	converted := attachment
-	converted.Content = buffer.Bytes()
-	converted.Size = int64(buffer.Len())
+	converted.Content = content
+	converted.Size = int64(len(content))
 	converted.MIMEType = "image/png"
 	converted.Extension = "png"
 	converted.Name = replaceExtension(attachment.Name, ".png")
-	return converted, nil
+	return converted
 }
 
 func replaceExtension(name, ext string) string {

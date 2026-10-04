@@ -98,6 +98,135 @@ func TestParseDocumentConvertsJPEGToPNGForUpstream(t *testing.T) {
 	}
 }
 
+// The inference endpoint takes PDF and PNG payloads only, which is the reason
+// prepareUpstreamAttachment exists at all. The declared type of an upload is
+// whatever the client labelled it with - the bundled UI derives it from the file
+// extension - so it says nothing about the encoding of the bytes. What is sent
+// upstream therefore has to be decided from the content, otherwise a JPEG saved
+// as ".png" travels verbatim under a Content-Type the endpoint will reject.
+func TestParseDocumentSendsPNGEncodedBytesForEveryImageUpload(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name         string
+		fileName     string
+		declaredMIME string
+		content      func(*testing.T) []byte
+	}{
+		{
+			name:         "png bytes declared as png",
+			fileName:     "sample.png",
+			declaredMIME: "image/png",
+			content:      func(t *testing.T) []byte { return createPNG(t, 400, 200) },
+		},
+		{
+			name:         "jpeg bytes declared as png",
+			fileName:     "sample.png",
+			declaredMIME: "image/png",
+			content:      func(t *testing.T) []byte { return createJPEG(t, 400, 200) },
+		},
+		{
+			name:         "jpeg bytes declared as jpeg",
+			fileName:     "sample.jpg",
+			declaredMIME: "image/jpeg",
+			content:      func(t *testing.T) []byte { return createJPEG(t, 400, 200) },
+		},
+		{
+			name:         "png bytes declared as jpeg",
+			fileName:     "sample.jpg",
+			declaredMIME: "image/jpeg",
+			content:      func(t *testing.T) []byte { return createPNG(t, 400, 200) },
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			var observedBytes []byte
+			observedMIME := ""
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reader, err := r.MultipartReader()
+				if err != nil {
+					t.Errorf("multipart reader: %v", err)
+					return
+				}
+				for {
+					part, err := reader.NextPart()
+					if err == io.EOF {
+						break
+					}
+					if err != nil {
+						t.Errorf("next part: %v", err)
+						return
+					}
+					if part.FormName() != "document" {
+						continue
+					}
+					observedMIME = normalizeObservedMIME(part.Header.Get("Content-Type"))
+					observedBytes, err = io.ReadAll(part)
+					if err != nil {
+						t.Errorf("read document part: %v", err)
+						return
+					}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"model":  "pii",
+					"result": map[string]any{"fields": []any{}},
+				})
+			}))
+			defer server.Close()
+
+			client := NewClient(config.UpstageConfig{
+				BaseURL: server.URL,
+				Timeout: 5 * time.Second,
+				Model:   "pii",
+				Lang:    "ko",
+				Schema:  "oac",
+			})
+
+			attachment := document.NewAttachment(testCase.fileName, testCase.declaredMIME, testCase.content(t))
+			if _, _, _, err := client.ParseDocument(context.Background(), attachment, ParseOptions{}); err != nil {
+				t.Fatalf("parse document: %v", err)
+			}
+
+			if observedMIME != "image/png" {
+				t.Fatalf("upstream content type is %s, want image/png", observedMIME)
+			}
+			_, format, err := image.Decode(bytes.NewReader(observedBytes))
+			if err != nil {
+				t.Fatalf("decode upstream payload: %v", err)
+			}
+			if format != "png" {
+				t.Fatalf("the upstream part declares %s but its bytes decode as %s", observedMIME, format)
+			}
+		})
+	}
+}
+
+// A PDF is already a format the endpoint accepts, so it must reach it byte for byte.
+func TestPrepareUpstreamAttachmentLeavesAPDFUntouched(t *testing.T) {
+	t.Parallel()
+
+	content := []byte("%PDF-1.4\nnot a real pdf but never decoded\n")
+	attachment := document.NewAttachment("sample.pdf", "application/pdf", content)
+
+	prepared, err := prepareUpstreamAttachment(attachment)
+	if err != nil {
+		t.Fatalf("prepare upstream attachment: %v", err)
+	}
+	if prepared.MIMEType != "application/pdf" {
+		t.Fatalf("unexpected mime type %s", prepared.MIMEType)
+	}
+	if !bytes.Equal(prepared.Content, content) {
+		t.Fatal("a pdf must be forwarded byte for byte")
+	}
+	if prepared.Name != "sample.pdf" {
+		t.Fatalf("unexpected name %s", prepared.Name)
+	}
+}
+
 func createJPEG(t *testing.T, width, height int) []byte {
 	t.Helper()
 
