@@ -33,6 +33,22 @@ func MaskValue(key, value string) MaskedValue {
 	}
 
 	masked := maskTrimmedValue(normalizeKey(key), trimmedValue)
+
+	// Every position based rule keeps part of its input visible, and several of
+	// them only ever replace digits. Given a value with no digit outside the
+	// visible window - a resident registration number truncated to its birth
+	// date, a single rune name, a placeholder such as "확인불가" - the rule
+	// returns its input unchanged, and that value is what pii_summary[].masked_value
+	// reports and job.json stores. Reporting a rule name over the original PII is
+	// worse than reporting less detail, so the whole value is hidden instead. The
+	// fallback lives here rather than inside each helper so that the digit
+	// position contracts ("the leading six digits stay visible") are untouched,
+	// and it uses maskAllVisible so the result stays rune aligned with the value
+	// drawn on the document.
+	if masked.MaskedValue == trimmedValue {
+		masked.MaskedValue = maskAllVisible(trimmedValue)
+	}
+
 	masked.MaskedValue = restoreSurroundingSpace(value, trimmedValue, masked.MaskedValue)
 	return masked
 }

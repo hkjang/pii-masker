@@ -41,6 +41,58 @@ func TestMaskValueExamples(t *testing.T) {
 	}
 }
 
+// The masked value is reported back in pii_summary[].masked_value and stored in
+// job.json, so a rule that matched but hid nothing would hand the original PII
+// back to the caller under a rule name claiming it had been masked.
+func TestMaskValueNeverReturnsTheOriginalValue(t *testing.T) {
+	t.Parallel()
+
+	values := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "single rune name", key: "이름", value: "이"},
+		{name: "single rune latin name", key: "firstname", value: "J"},
+		{name: "resident registration birth date only", key: "주민등록번호", value: "900101"},
+		{name: "resident registration placeholder", key: "주민등록번호", value: "확인불가"},
+		{name: "credit card placeholder", key: "신용카드번호", value: "카드없음"},
+		{name: "account placeholder", key: "계좌번호", value: "미상"},
+		{name: "telephone placeholder", key: "전화번호", value: "연락처없음"},
+		{name: "driver license placeholder", key: "운전면허번호", value: "없음"},
+	}
+
+	for _, tt := range values {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			masked := MaskValue(tt.key, tt.value)
+			if masked.Rule.RuleName == "empty" {
+				t.Fatalf("expected a masking rule to match %q", tt.key)
+			}
+			if masked.MaskedValue == tt.value {
+				t.Fatalf("rule %q reported %q unmasked", masked.Rule.RuleName, masked.MaskedValue)
+			}
+		})
+	}
+}
+
+// An empty or whitespace-only value has nothing to hide, so it keeps the "empty"
+// rule and is returned verbatim rather than going through the fallback.
+func TestMaskValueLeavesBlankValuesAlone(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{"", "   ", "\t\n"} {
+		masked := MaskValue("주민등록번호", value)
+		if masked.Rule.RuleName != "empty" {
+			t.Fatalf("value %q matched rule %q, want empty", value, masked.Rule.RuleName)
+		}
+		if masked.MaskedValue != value {
+			t.Fatalf("value %q was rewritten to %q", value, masked.MaskedValue)
+		}
+	}
+}
+
 func TestComputeMaskedRuneSpans(t *testing.T) {
 	t.Parallel()
 
@@ -82,6 +134,16 @@ func TestMaskValueKeepsRuneAlignment(t *testing.T) {
 		{key: "개인정보.주소", value: "  서울   영등포구   국제금융로   10  "},
 		{key: "개인정보.주소", value: "서울특별시"},
 		{key: "알수없는키", value: " 알 수 없는 값 "},
+		// Values that no digit- or position-based helper can hide on its own, so
+		// they reach the full-mask fallback and still have to stay rune aligned.
+		{key: "이름", value: "이"},
+		{key: "firstname", value: "J"},
+		{key: "주민등록번호", value: " 900101 "},
+		{key: "주민등록번호", value: "확인불가"},
+		{key: "신용카드번호", value: "카드없음"},
+		{key: "계좌번호", value: "미상"},
+		{key: "전화번호", value: " 연락처 없음 "},
+		{key: "운전면허번호", value: "없음"},
 	}
 
 	for _, tt := range values {

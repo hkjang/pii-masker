@@ -1621,6 +1621,55 @@ func TestMaskSendsPNGBytesUpstreamForAJPEGDeclaredAsPNG(t *testing.T) {
 	}
 }
 
+// pii_summary[].masked_value is handed back in the response and written to
+// job.json, so a value that a rule matched but could not hide would leak the
+// original PII through both. A resident registration number truncated to its
+// birth-date half is the realistic case: every digit falls inside the six the
+// rule keeps visible.
+//
+// This drives the whole production path - config, app.New, the real HTTP handler,
+// the upstage client and the masking engine - with a local upstream handler because
+// the embedded mock only emits its own field set.
+func TestMaskNeverReportsAnUnmaskedValueInThePIISummary(t *testing.T) {
+	t.Parallel()
+
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"mock-pii","model":"pii","result":{"apiVersion":"1.1","documentType":"pii","confidence":0.99,` +
+			`"fields":[{"key":"개인정보.주민등록번호","value":"900101","confidence":0.99,"boundingBoxes":[{"page":1,"vertices":` +
+			`[{"x":40,"y":20},{"x":112,"y":20},{"x":112,"y":36},{"x":40,"y":36}]}]}],` +
+			`"metadata":{"pages":[{"page":1,"width":400,"height":200}]}}}`))
+	})
+	serverURL, _ := startAppServerWithUpstream(t, upstream, nil)
+
+	requestBody, contentType := buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 400, 200), nil)
+	response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+
+	metadata, _ := parseMultipartMaskResponse(t, response)
+	if metadata.Status != "completed" {
+		t.Fatalf("expected completed status, got %q (%#v)", metadata.Status, metadata.Error)
+	}
+	if len(metadata.PIISummary) != 1 {
+		t.Fatalf("expected one summary item, got %#v", metadata.PIISummary)
+	}
+	item := metadata.PIISummary[0]
+	if item.RuleName != "resident_registration_number" {
+		t.Fatalf("unexpected rule %q", item.RuleName)
+	}
+	if item.MaskedValue == "900101" {
+		t.Fatalf("rule %q reported the original value in masked_value: %q", item.RuleName, item.MaskedValue)
+	}
+}
+
 func startAppServer(t *testing.T) string {
 	t.Helper()
 
