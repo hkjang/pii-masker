@@ -1670,6 +1670,132 @@ func TestMaskNeverReportsAnUnmaskedValueInThePIISummary(t *testing.T) {
 	}
 }
 
+// offPageBoxUpstream answers 200 with a field to mask whose bounding box sits far
+// outside the uploaded 400x200 image and reports no page size, so the masker cannot
+// tell what units the coordinates are in and refuses to hand back a file it could
+// not draw over. Nothing about the request was wrong, so the caller has to learn
+// that retrying is the one thing that might work.
+func offPageBoxUpstream() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"mock-pii","model":"pii","result":{"apiVersion":"1.1","documentType":"pii","confidence":0.99,` +
+			`"fields":[{"key":"개인정보.이름","value":"홍길동","confidence":0.99,"boundingBoxes":[{"page":1,"vertices":` +
+			`[{"x":4000,"y":2000},{"x":4800,"y":2000},{"x":4800,"y":2100},{"x":4000,"y":2100}]}]}]}}`))
+	})
+}
+
+// The upload was valid and the endpoint answered 200; only the coordinates it
+// reported were unusable. That is an upstream failure the caller can retry, not a
+// bad request.
+func TestMaskReportsUnusableUpstreamCoordinatesAsRetryableBadGateway(t *testing.T) {
+	t.Parallel()
+
+	serverURL, _ := startAppServerWithUpstream(t, offPageBoxUpstream(), nil)
+
+	requestBody, contentType := buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 400, 200), nil)
+	response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer response.Body.Close()
+
+	var metadata core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+		t.Fatalf("decode error metadata: %v", err)
+	}
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("unexpected status %d, want 502: %#v", response.StatusCode, metadata.Error)
+	}
+	if metadata.Status != "failed" || metadata.Error == nil {
+		t.Fatalf("expected a failed metadata with an error, got %#v", metadata)
+	}
+	if metadata.Error.Code != "masking_failed" {
+		t.Fatalf("unexpected error code %q, want masking_failed: %#v", metadata.Error.Code, metadata.Error)
+	}
+	if !metadata.Error.Retryable {
+		t.Fatalf("expected a retryable error, got %#v", metadata.Error)
+	}
+}
+
+// The async path reports the same failure in the job record rather than in a status
+// code, so both paths have to agree on the code and on retryability.
+func TestAsyncJobReportsUnusableUpstreamCoordinatesAsRetryableMaskingFailure(t *testing.T) {
+	t.Parallel()
+
+	serverURL, _ := startAppServerWithUpstream(t, offPageBoxUpstream(), nil)
+
+	requestBody, contentType := buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 400, 200), nil)
+	response, err := http.Post(serverURL+"/v1/jobs", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/jobs: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	var created core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
+		t.Fatalf("decode job metadata: %v", err)
+	}
+
+	job := waitForJobStatus(t, serverURL, created.JobID, "failed")
+	if job.Error == nil {
+		t.Fatalf("expected an error on the failed job, got %#v", job)
+	}
+	if job.Error.Code != "masking_failed" {
+		t.Fatalf("unexpected error code %q, want masking_failed: %#v", job.Error.Code, job.Error)
+	}
+	if !job.Error.Retryable {
+		t.Fatalf("expected a retryable error, got %#v", job.Error)
+	}
+}
+
+// Failures the caller caused keep their 400 and their processing_failed code: the
+// upstream reclassification must not sweep up uploads the service itself refused.
+func TestMaskKeepsClientCausedFailuresAsBadRequest(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		filename string
+		mimeType string
+		content  []byte
+	}{
+		{name: "empty upload", filename: "empty.png", mimeType: "image/png", content: []byte{}},
+		{name: "unsupported type", filename: "notes.txt", mimeType: "text/plain", content: []byte("홍길동 010-1234-5678")},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			serverURL, _ := startAppServerWithUpstream(t, offPageBoxUpstream(), nil)
+
+			requestBody, contentType := buildMultipartBody(t, testCase.filename, testCase.mimeType, testCase.content, nil)
+			response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+			if err != nil {
+				t.Fatalf("post /v1/mask: %v", err)
+			}
+			defer response.Body.Close()
+
+			var metadata core.ProcessMetadata
+			if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+				t.Fatalf("decode error metadata: %v", err)
+			}
+			if response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("unexpected status %d, want 400: %#v", response.StatusCode, metadata.Error)
+			}
+			if metadata.Error == nil || metadata.Error.Code != "processing_failed" {
+				t.Fatalf("unexpected error %#v, want processing_failed", metadata.Error)
+			}
+			if metadata.Error.Retryable {
+				t.Fatalf("expected a non-retryable error, got %#v", metadata.Error)
+			}
+		})
+	}
+}
+
 func startAppServer(t *testing.T) string {
 	t.Helper()
 
