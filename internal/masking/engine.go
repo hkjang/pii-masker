@@ -396,6 +396,29 @@ type placedRegion struct {
 // the page. Anything thinner was clipped away or never overlapped the page.
 const minPlacedSize = 0.5
 
+// RegionPlacementError reports that the geometry the inference endpoint supplied
+// for a region cannot be mapped onto a page that does state its size: the units
+// were misread, or a coordinate was not a finite number. What is unusable is the
+// answer, not the upload, so callers classify this as an upstream failure rather
+// than a bad request, and the same upload sent again may well succeed.
+//
+// A refusal that the upload caused - a page that reports no size at all - is a
+// plain error instead, so it keeps being reported as a bad request.
+//
+// Detail carries the whole message so each site keeps the wording it already had.
+type RegionPlacementError struct {
+	PageNumber int
+	Detail     string
+}
+
+func (e *RegionPlacementError) Error() string {
+	return e.Detail
+}
+
+func placementError(pageNumber int, format string, args ...any) *RegionPlacementError {
+	return &RegionPlacementError{PageNumber: pageNumber, Detail: fmt.Sprintf(format, args...)}
+}
+
 // placeRegion maps a region reported by the inference endpoint onto a page of the
 // given size. Coordinates come in three flavours: normalized to the page (0..1),
 // pixels of the page image the endpoint rendered (whose size it reports alongside),
@@ -403,12 +426,15 @@ const minPlacedSize = 0.5
 // the page is an error rather than a stamp nobody can see: it means the units were
 // misread, and returning the document as "masked" would leak the field it covers.
 func placeRegion(region Region, apiSize PageSize, hasAPISize bool, target PageSize) (placedRegion, error) {
+	// A page with no size is a fact about the uploaded document, not about the
+	// reported coordinates, so this stays a plain error that callers blame on the
+	// request.
 	if target.Width <= 0 || target.Height <= 0 {
 		return placedRegion{}, fmt.Errorf("page %d has no usable dimensions", region.PageNumber)
 	}
 	minX, minY, maxX, maxY := polygonBounds(region.Polygon)
 	if math.IsNaN(minX+minY+maxX+maxY) || math.IsInf(minX+minY+maxX+maxY, 0) {
-		return placedRegion{}, fmt.Errorf("mask region on page %d has invalid coordinates", region.PageNumber)
+		return placedRegion{}, placementError(region.PageNumber, "mask region on page %d has invalid coordinates", region.PageNumber)
 	}
 
 	scaleX, scaleY := 1.0, 1.0
@@ -423,7 +449,7 @@ func placeRegion(region Region, apiSize PageSize, hasAPISize bool, target PageSi
 		// If they overflow the page they were pixels of some unknown rendering,
 		// and scaling them cannot be guessed.
 		if maxX > target.Width*(1+overflowTolerance) || maxY > target.Height*(1+overflowTolerance) {
-			return placedRegion{}, fmt.Errorf(
+			return placedRegion{}, placementError(region.PageNumber,
 				"mask region on page %d spans (%.1f, %.1f)-(%.1f, %.1f) but the page is %.1f x %.1f and the upstream response reported no page size",
 				region.PageNumber, minX, minY, maxX, maxY, target.Width, target.Height)
 		}
@@ -436,7 +462,7 @@ func placeRegion(region Region, apiSize PageSize, hasAPISize bool, target PageSi
 		maxY: math.Min(maxY*scaleY, target.Height),
 	}
 	if placed.maxX-placed.minX < minPlacedSize || placed.maxY-placed.minY < minPlacedSize {
-		return placedRegion{}, fmt.Errorf(
+		return placedRegion{}, placementError(region.PageNumber,
 			"mask region on page %d spans (%.1f, %.1f)-(%.1f, %.1f) and does not land on the %.1f x %.1f page",
 			region.PageNumber, minX, minY, maxX, maxY, target.Width, target.Height)
 	}

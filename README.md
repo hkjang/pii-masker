@@ -77,10 +77,13 @@
 
 - 응답 본문을 JSON으로 해석하지 못했을 때 (`upstream_payload_unrecognized`)
 - 응답에 `fields`/`document`/`documents`/`groups`/`entities` 같은 필드 목록이 아예 없거나, 좌표는 있는데 값을 하나도 읽어내지 못했을 때 (`upstream_payload_unrecognized`)
-- PII 필드는 있는데 bounding box가 없을 때 (`processing_failed`)
-- 영역이 문서에 없는 페이지를 가리키거나, 페이지 밖에 떨어지거나, 페이지 크기 정보 없이 페이지보다 큰 좌표를 쓰고 있어서 어디를 덮어야 할지 알 수 없을 때 (`processing_failed`)
+- PII 필드는 있는데 bounding box가 없을 때 (`masking_failed`)
+- 영역이 페이지 밖에 떨어지거나, 페이지 크기 정보 없이 페이지보다 큰 좌표를 쓰거나, 좌표가 숫자가 아니어서 어디를 덮어야 할지 알 수 없을 때 (`masking_failed`)
+- 덮을 영역이 있었는데도 결과가 원본과 한 바이트도 다르지 않을 때 (`masking_failed`)
+- 영역이 문서에 없는 페이지를 가리킬 때 (`processing_failed`)
+- 업로드한 PDF의 페이지가 크기를 전혀 알려주지 않아(`/MediaBox`가 비었을 때처럼) 좌표를 올려놓을 바탕이 없을 때 (`processing_failed`)
 
-동기 요청은 이때 `502`(`processing_failed`는 `400`)를 돌려주고, 비동기 작업은 `failed` 상태에 `download_url` 없이 남습니다. 응답 파싱에는 잘리지 않은 본문 전체를 쓰며, 디버그용으로 `16KB`에서 잘라 보관하는 복사본은 표시에만 씁니다.
+응답만 쓸 수 없었던 `upstream_payload_unrecognized`·`masking_failed`는 동기 요청에 `502`를 돌려주고, 업로드 자체가 원인일 수 있는 `processing_failed`는 `400`을 돌려줍니다. `masking_failed`는 업로드가 아니라 응답이 원인이므로 같은 요청을 다시 보내면 다른 응답을 받아 성공할 수 있어 `error.retryable`이 `true`입니다. `processing_failed`는 같은 파일을 다시 보내도 같은 결과이므로 `false`입니다. 비동기 작업은 상태코드 대신 `failed` 상태에 같은 `error.code`를 담고 `download_url` 없이 남습니다. 응답 파싱에는 잘리지 않은 본문 전체를 쓰며, 디버그용으로 `16KB`에서 잘라 보관하는 복사본은 표시에만 씁니다.
 
 응답 메타데이터의 `mask_policy.applied_regions`는 실제로 문서 위에 그린 박스 수입니다. `completed`인데 `0`이면 엔드포인트가 PII를 하나도 보고하지 않아 업로드한 파일이 그대로 돌아온 것입니다.
 

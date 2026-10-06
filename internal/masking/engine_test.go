@@ -3,12 +3,14 @@ package masking
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
 	"image/jpeg"
 	"image/png"
+	"math"
 	"testing"
 )
 
@@ -245,6 +247,67 @@ func TestPlaceRegionRejectsBoxesOutsideThePage(t *testing.T) {
 	}
 }
 
+// Each refusal below states the same fact: the coordinates the inference endpoint
+// reported cannot be mapped onto a page whose size is known. Callers classify that
+// as an upstream failure, not a bad upload, so one errors.As has to cover all of
+// them. A page that reports no size is the upload's fault and is excluded - see
+// TestMaskPDFFileBlamesTheDocumentForAPageWithoutDimensions.
+func TestPlaceRegionReportsUntrustedCoordinatesAsRegionPlacementError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		region     Region
+		apiSize    PageSize
+		hasAPISize bool
+		target     PageSize
+	}{
+		{
+			name:   "coordinates that are not numbers",
+			region: Region{PageNumber: 1, Polygon: [4][2]float64{{math.NaN(), 10}, {20, 10}, {20, 20}, {10, 20}}},
+			target: PageSize{Width: 595, Height: 842},
+		},
+		{
+			name:   "coordinates that are infinite",
+			region: Region{PageNumber: 1, Polygon: [4][2]float64{{10, 10}, {math.Inf(1), 10}, {20, 20}, {10, 20}}},
+			target: PageSize{Width: 595, Height: 842},
+		},
+		{
+			name:   "pixels without a reported page size",
+			region: Region{PageNumber: 1, Polygon: [4][2]float64{{1200, 1600}, {1500, 1600}, {1500, 1650}, {1200, 1650}}},
+			target: PageSize{Width: 595, Height: 842},
+		},
+		{
+			name:       "box scaled outside the page",
+			region:     Region{PageNumber: 3, Polygon: [4][2]float64{{1100, 10}, {1200, 10}, {1200, 20}, {1100, 20}}},
+			apiSize:    PageSize{Width: 1000, Height: 1000},
+			hasAPISize: true,
+			target:     PageSize{Width: 500, Height: 500},
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := placeRegion(testCase.region, testCase.apiSize, testCase.hasAPISize, testCase.target)
+			if err == nil {
+				t.Fatalf("expected placeRegion to refuse the region")
+			}
+			var placement *RegionPlacementError
+			if !errors.As(err, &placement) {
+				t.Fatalf("error %q (%T) is not a *RegionPlacementError", err, err)
+			}
+			if placement.PageNumber != testCase.region.PageNumber {
+				t.Fatalf("reported page %d, want %d", placement.PageNumber, testCase.region.PageNumber)
+			}
+			if placement.Error() != err.Error() {
+				t.Fatalf("wrapped message %q differs from %q", placement.Error(), err.Error())
+			}
+		})
+	}
+}
+
 func TestMaskImageFileFailsWhenARegionMissesTheImage(t *testing.T) {
 	t.Parallel()
 
@@ -304,6 +367,31 @@ func TestMaskPDFFileFailsForRegionsOnMissingPages(t *testing.T) {
 	regions := []Region{{PageNumber: 3, Polygon: [4][2]float64{{10, 10}, {50, 10}, {50, 30}, {10, 30}}}}
 	if _, err := MaskPDFFile(blankPDF(200, 200), regions, nil); err == nil {
 		t.Fatalf("expected masking to fail for a page the document does not have")
+	}
+}
+
+// A page that declares no size is a property of the uploaded document, not of the
+// coordinates the inference endpoint reported: only a PDF whose MediaBox is empty
+// reaches this refusal, because an image with a zero dimension is rejected while
+// its header is read. Sending the same file again cannot succeed, so this must not
+// be reported as an unusable upstream answer that is worth a retry.
+func TestMaskPDFFileBlamesTheDocumentForAPageWithoutDimensions(t *testing.T) {
+	t.Parallel()
+
+	regions := []Region{{PageNumber: 1, Polygon: [4][2]float64{{10, 10}, {100, 10}, {100, 40}, {10, 40}}}}
+	_, err := MaskPDFFile(blankPDF(0, 0), regions, nil)
+	if err == nil {
+		t.Fatalf("expected masking to fail for a page with no usable dimensions")
+	}
+	var placement *RegionPlacementError
+	if errors.As(err, &placement) {
+		t.Fatalf("error %q is a *RegionPlacementError, but the zero-sized page came from the upload", err)
+	}
+
+	// The same coordinates on a page that does report a size are placed fine, so the
+	// refusal above is about the document rather than the region.
+	if _, err := MaskPDFFile(blankPDF(595, 842), regions, nil); err != nil {
+		t.Fatalf("masking a page that reports its size: %v", err)
 	}
 }
 

@@ -109,6 +109,19 @@ func (e *unrecognizedPayloadError) Error() string {
 	return "upstream response could not be interpreted as PII fields: " + e.detail
 }
 
+// maskingFailedError marks a 200 response whose fields were read but whose geometry
+// could not be turned into a masked document. Like unrecognizedPayloadError it is
+// an upstream failure rather than a bad request: the upload was accepted, validated
+// and sent, and only the answer came back unusable. Unlike it, the same request may
+// succeed on a retry, because nothing about the request is what made it fail.
+type maskingFailedError struct {
+	detail string
+}
+
+func (e *maskingFailedError) Error() string {
+	return e.detail
+}
+
 func New(cfg config.Config, client *upstage.Client, jobStore *jobs.Store) *Service {
 	slots := cfg.Limits.MaxConcurrentJobs
 	if slots <= 0 {
@@ -582,7 +595,7 @@ func (s *Service) process(ctx context.Context, requestID string, input ProcessIn
 		}
 	}
 	if len(summary) > 0 && len(regions) == 0 {
-		err = fmt.Errorf("PII fields were detected but the upstream response did not contain usable bounding boxes for partial visual masking")
+		err = &maskingFailedError{detail: "PII fields were detected but the upstream response did not contain usable bounding boxes for partial visual masking"}
 		metadata.Error = mapError(err)
 		return metadata, nil, err
 	}
@@ -602,7 +615,7 @@ func (s *Service) process(ctx context.Context, requestID string, input ProcessIn
 			return metadata, nil, err
 		}
 		if bytes.Equal(maskedContent, input.Attachment.Content) {
-			err = fmt.Errorf("masking detected drawable regions but produced an output identical to the original document")
+			err = &maskingFailedError{detail: "masking detected drawable regions but produced an output identical to the original document"}
 			metadata.Error = mapError(err)
 			return metadata, nil, err
 		}
@@ -737,6 +750,20 @@ func mapError(err error) *core.APIError {
 			Message:   "PII API 응답을 해석하지 못해 마스킹을 완료할 수 없습니다.",
 			Detail:    unrecognized.detail,
 			Retryable: false,
+		}
+	}
+	// The endpoint answered 200 and its fields were read, but its geometry could not
+	// be drawn onto the document. Reporting this as a client error would hand back a
+	// 400 for a request that had nothing wrong with it and deny the caller the only
+	// move that can still work.
+	var placement *masking.RegionPlacementError
+	var maskingFailed *maskingFailedError
+	if errors.As(err, &placement) || errors.As(err, &maskingFailed) {
+		return &core.APIError{
+			Code:      "masking_failed",
+			Message:   "PII API 응답의 좌표로 마스킹을 완료할 수 없습니다.",
+			Detail:    err.Error(),
+			Retryable: true,
 		}
 	}
 	return &core.APIError{
