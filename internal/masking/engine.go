@@ -397,11 +397,13 @@ type placedRegion struct {
 const minPlacedSize = 0.5
 
 // RegionPlacementError reports that the geometry the inference endpoint supplied
-// for a region cannot be mapped onto the page: the units were misread, a
-// coordinate was not a finite number, or the page reports no size to map onto.
-// The upload itself was readable - a decode or a PDF parse would have failed
-// first - so callers classify this as an unusable upstream answer rather than a
-// bad request, and the same upload sent again may well succeed.
+// for a region cannot be mapped onto a page that does state its size: the units
+// were misread, or a coordinate was not a finite number. What is unusable is the
+// answer, not the upload, so callers classify this as an upstream failure rather
+// than a bad request, and the same upload sent again may well succeed.
+//
+// A refusal that the upload caused - a page that reports no size at all - is a
+// plain error instead, so it keeps being reported as a bad request.
 //
 // Detail carries the whole message so each site keeps the wording it already had.
 type RegionPlacementError struct {
@@ -424,8 +426,11 @@ func placementError(pageNumber int, format string, args ...any) *RegionPlacement
 // the page is an error rather than a stamp nobody can see: it means the units were
 // misread, and returning the document as "masked" would leak the field it covers.
 func placeRegion(region Region, apiSize PageSize, hasAPISize bool, target PageSize) (placedRegion, error) {
+	// A page with no size is a fact about the uploaded document, not about the
+	// reported coordinates, so this stays a plain error that callers blame on the
+	// request.
 	if target.Width <= 0 || target.Height <= 0 {
-		return placedRegion{}, placementError(region.PageNumber, "page %d has no usable dimensions", region.PageNumber)
+		return placedRegion{}, fmt.Errorf("page %d has no usable dimensions", region.PageNumber)
 	}
 	minX, minY, maxX, maxY := polygonBounds(region.Polygon)
 	if math.IsNaN(minX+minY+maxX+maxY) || math.IsInf(minX+minY+maxX+maxY, 0) {
