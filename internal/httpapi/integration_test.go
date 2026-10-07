@@ -1684,6 +1684,87 @@ func offPageBoxUpstream() http.Handler {
 	})
 }
 
+// missingPageUpstream answers 200 with a field to mask whose bounding box names
+// page 3 of a one page document. The coordinates themselves sit well inside the
+// uploaded 400x400 page, so the only thing the masker can object to is the page
+// number: the endpoint answered about a document this is not. The upload opens
+// fine, so the caller has to learn that retrying is the one thing that might work.
+func missingPageUpstream() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"mock-pii","model":"pii","result":{"apiVersion":"1.1","documentType":"pii","confidence":0.99,` +
+			`"fields":[{"key":"개인정보.이름","value":"홍길동","confidence":0.99,"boundingBoxes":[{"page":3,"vertices":` +
+			`[{"x":40,"y":20},{"x":200,"y":20},{"x":200,"y":60},{"x":40,"y":60}]}]}]}}`))
+	})
+}
+
+// A page number the document does not have is a property of the upstream answer,
+// so it has to be reported the same way unusable coordinates are, rather than as a
+// bad request the caller could not have avoided.
+func TestMaskReportsAnUpstreamPageTheDocumentLacksAsRetryableBadGateway(t *testing.T) {
+	t.Parallel()
+
+	serverURL, _ := startAppServerWithUpstream(t, missingPageUpstream(), nil)
+
+	requestBody, contentType := buildMultipartBody(t, "sample.pdf", "application/pdf", createBlankPDF(400, 400), nil)
+	response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/mask: %v", err)
+	}
+	defer response.Body.Close()
+
+	var metadata core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+		t.Fatalf("decode error metadata: %v", err)
+	}
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("unexpected status %d, want 502: %#v", response.StatusCode, metadata.Error)
+	}
+	if metadata.Status != "failed" || metadata.Error == nil {
+		t.Fatalf("expected a failed metadata with an error, got %#v", metadata)
+	}
+	if metadata.Error.Code != "masking_failed" {
+		t.Fatalf("unexpected error code %q, want masking_failed: %#v", metadata.Error.Code, metadata.Error)
+	}
+	if !metadata.Error.Retryable {
+		t.Fatalf("expected a retryable error, got %#v", metadata.Error)
+	}
+}
+
+// The async path reports the same failure in the job record, so both paths have to
+// agree on the code and on retryability for a page the document does not have too.
+func TestAsyncJobReportsAnUpstreamPageTheDocumentLacksAsRetryableMaskingFailure(t *testing.T) {
+	t.Parallel()
+
+	serverURL, _ := startAppServerWithUpstream(t, missingPageUpstream(), nil)
+
+	requestBody, contentType := buildMultipartBody(t, "sample.pdf", "application/pdf", createBlankPDF(400, 400), nil)
+	response, err := http.Post(serverURL+"/v1/jobs", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/jobs: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	var created core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
+		t.Fatalf("decode job metadata: %v", err)
+	}
+
+	job := waitForJobStatus(t, serverURL, created.JobID, "failed")
+	if job.Error == nil {
+		t.Fatalf("expected an error on the failed job, got %#v", job)
+	}
+	if job.Error.Code != "masking_failed" {
+		t.Fatalf("unexpected error code %q, want masking_failed: %#v", job.Error.Code, job.Error)
+	}
+	if !job.Error.Retryable {
+		t.Fatalf("expected a retryable error, got %#v", job.Error)
+	}
+}
+
 // The upload was valid and the endpoint answered 200; only the coordinates it
 // reported were unusable. That is an upstream failure the caller can retry, not a
 // bad request.
