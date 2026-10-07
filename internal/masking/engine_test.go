@@ -361,12 +361,44 @@ func TestMaskImageFileEncodesTheFormatTheMIMETypeAdvertises(t *testing.T) {
 	}
 }
 
+// A page number the document does not have says the inference endpoint answered
+// about some other document, not that the upload was wrong, so this refusal is
+// reported as an unusable upstream answer that the caller may retry.
 func TestMaskPDFFileFailsForRegionsOnMissingPages(t *testing.T) {
 	t.Parallel()
 
-	regions := []Region{{PageNumber: 3, Polygon: [4][2]float64{{10, 10}, {50, 10}, {50, 30}, {10, 30}}}}
-	if _, err := MaskPDFFile(blankPDF(200, 200), regions, nil); err == nil {
-		t.Fatalf("expected masking to fail for a page the document does not have")
+	cases := []struct {
+		name       string
+		pageNumber int
+	}{
+		{name: "page past the end of the document", pageNumber: 3},
+		{name: "no page reported at all", pageNumber: 0},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			regions := []Region{{PageNumber: testCase.pageNumber, Polygon: [4][2]float64{{10, 10}, {50, 10}, {50, 30}, {10, 30}}}}
+			_, err := MaskPDFFile(blankPDF(200, 200), regions, nil)
+			if err == nil {
+				t.Fatalf("expected masking to fail for a page the document does not have")
+			}
+			var placement *RegionPlacementError
+			if !errors.As(err, &placement) {
+				t.Fatalf("error %q (%T) is not a *RegionPlacementError", err, err)
+			}
+			if placement.PageNumber != testCase.pageNumber {
+				t.Fatalf("reported page %d, want %d", placement.PageNumber, testCase.pageNumber)
+			}
+			if placement.Error() != err.Error() {
+				t.Fatalf("wrapped message %q differs from %q", placement.Error(), err.Error())
+			}
+			want := fmt.Sprintf("mask region refers to page %d but the document has 1 page(s)", testCase.pageNumber)
+			if err.Error() != want {
+				t.Fatalf("message %q, want %q", err.Error(), want)
+			}
+		})
 	}
 }
 

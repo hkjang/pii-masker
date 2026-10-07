@@ -398,9 +398,11 @@ const minPlacedSize = 0.5
 
 // RegionPlacementError reports that the geometry the inference endpoint supplied
 // for a region cannot be mapped onto a page that does state its size: the units
-// were misread, or a coordinate was not a finite number. What is unusable is the
-// answer, not the upload, so callers classify this as an upstream failure rather
-// than a bad request, and the same upload sent again may well succeed.
+// were misread, or a coordinate was not a finite number. A page number the
+// document does not have is the same kind of fault - the answer describes some
+// other document. What is unusable is the answer, not the upload, so callers
+// classify this as an upstream failure rather than a bad request, and the same
+// upload sent again may well succeed.
 //
 // A refusal that the upload caused - a page that reports no size at all - is a
 // plain error instead, so it keeps being reported as a bad request.
@@ -568,7 +570,7 @@ func maskPDFFileInternal(content []byte, regions []Region, pageSizes map[int]Pag
 	for _, region := range regions {
 		pageNumber := region.PageNumber
 		if pageNumber < 1 || pageNumber > len(pdfPageDims) {
-			return nil, fmt.Errorf("mask region refers to page %d but the document has %d page(s)", pageNumber, len(pdfPageDims))
+			return nil, placementError(pageNumber, "mask region refers to page %d but the document has %d page(s)", pageNumber, len(pdfPageDims))
 		}
 		target := PageSize{Width: pdfPageDims[pageNumber-1].Width, Height: pdfPageDims[pageNumber-1].Height}
 		apiSize, hasAPISize := pageSizes[pageNumber]
