@@ -308,6 +308,74 @@ func TestPlaceRegionReportsUntrustedCoordinatesAsRegionPlacementError(t *testing
 	}
 }
 
+func TestMaskImageFileFailsForRegionsOnMissingPages(t *testing.T) {
+	t.Parallel()
+
+	for _, pageNumber := range []int{2, 3, -1} {
+		for _, validFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("page_%d/valid_first_%t", pageNumber, validFirst), func(t *testing.T) {
+				t.Parallel()
+
+				polygon := [4][2]float64{{10, 10}, {50, 10}, {50, 30}, {10, 30}}
+				var regions []Region
+				if validFirst {
+					regions = append(regions, Region{PageNumber: 1, Polygon: polygon})
+				}
+				regions = append(regions, Region{PageNumber: pageNumber, Polygon: polygon})
+				masked, err := MaskImageFile(whitePNG(t, 100, 100), "image/png", regions, nil)
+				if err == nil {
+					t.Fatalf("expected masking to fail for missing page %d, got %d result bytes", pageNumber, len(masked))
+				}
+				if masked != nil {
+					t.Fatalf("failed masking returned %d result bytes", len(masked))
+				}
+				var placement *RegionPlacementError
+				if !errors.As(err, &placement) {
+					t.Fatalf("error %q (%T) is not a *RegionPlacementError", err, err)
+				}
+				if placement.PageNumber != pageNumber {
+					t.Fatalf("reported page %d, want %d", placement.PageNumber, pageNumber)
+				}
+				want := fmt.Sprintf("mask region refers to page %d but the document has 1 page(s)", pageNumber)
+				if err.Error() != want {
+					t.Fatalf("message %q, want %q", err.Error(), want)
+				}
+			})
+		}
+	}
+}
+
+func TestMaskImageFileMasksPageZeroAndOne(t *testing.T) {
+	t.Parallel()
+
+	for _, pageNumber := range []int{0, 1} {
+		t.Run(fmt.Sprintf("page_%d", pageNumber), func(t *testing.T) {
+			t.Parallel()
+
+			regions := []Region{{PageNumber: pageNumber, Polygon: [4][2]float64{{10, 10}, {50, 10}, {50, 30}, {10, 30}}}}
+			masked, err := MaskImageFile(whitePNG(t, 100, 100), "image/png", regions, nil)
+			if err != nil {
+				t.Fatalf("mask image: %v", err)
+			}
+			img, err := png.Decode(bytes.NewReader(masked))
+			if err != nil {
+				t.Fatalf("decode masked PNG: %v", err)
+			}
+			for y := 0; y < 100; y++ {
+				for x := 0; x < 100; x++ {
+					want := color.White
+					if x >= 10 && x < 50 && y >= 10 && y < 30 {
+						want = color.Black
+					}
+					if got := color.Gray16Model.Convert(img.At(x, y)); got != want {
+						t.Fatalf("pixel (%d,%d) = %v, want %v", x, y, got, want)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestMaskImageFileFailsWhenARegionMissesTheImage(t *testing.T) {
 	t.Parallel()
 

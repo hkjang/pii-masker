@@ -79,7 +79,7 @@
 - 응답에 `fields`/`document`/`documents`/`groups`/`entities` 같은 필드 목록이 아예 없거나, 좌표는 있는데 값을 하나도 읽어내지 못했을 때 (`upstream_payload_unrecognized`)
 - PII 필드는 있는데 bounding box가 없을 때 (`masking_failed`)
 - 영역이 페이지 밖에 떨어지거나, 페이지 크기 정보 없이 페이지보다 큰 좌표를 쓰거나, 좌표가 숫자가 아니어서 어디를 덮어야 할지 알 수 없을 때 (`masking_failed`)
-- 영역이 문서에 없는 페이지를 가리킬 때 (`masking_failed`)
+- 영역이 문서에 없는 페이지를 가리킬 때 (`masking_failed`) — 이미지에도 적용되며, 업스트림 응답에서 페이지를 생략하면 첫 페이지로 간주합니다.
 - 덮을 영역이 있었는데도 결과가 원본과 한 바이트도 다르지 않을 때 (`masking_failed`)
 - 업로드한 PDF의 페이지가 크기를 전혀 알려주지 않아(`/MediaBox`가 비었을 때처럼) 좌표를 올려놓을 바탕이 없을 때 (`processing_failed`)
 

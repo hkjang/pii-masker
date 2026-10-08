@@ -503,6 +503,10 @@ func MaskImageFile(content []byte, mimeType string, regions []Region, pageSizes 
 
 	rects := make([]image.Rectangle, 0, len(regions))
 	for _, region := range regions {
+		// Keep page 0 compatible with callers that leave the image page unspecified.
+		if region.PageNumber < 0 || region.PageNumber > 1 {
+			return nil, placementError(region.PageNumber, "mask region refers to page %d but the document has %d page(s)", region.PageNumber, 1)
+		}
 		placed, err := placeRegion(region, apiSize, hasAPISize, target)
 		if err != nil {
 			return nil, err

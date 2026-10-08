@@ -1704,30 +1704,55 @@ func missingPageUpstream() http.Handler {
 func TestMaskReportsAnUpstreamPageTheDocumentLacksAsRetryableBadGateway(t *testing.T) {
 	t.Parallel()
 
-	serverURL, _ := startAppServerWithUpstream(t, missingPageUpstream(), nil)
+	cases := []struct {
+		name     string
+		mimeType string
+		content  []byte
+	}{
+		{name: "pdf", mimeType: "application/pdf", content: createBlankPDF(400, 400)},
+		{name: "png", mimeType: "image/png", content: createBlankPNG(t, 400, 200)},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 
-	requestBody, contentType := buildMultipartBody(t, "sample.pdf", "application/pdf", createBlankPDF(400, 400), nil)
-	response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
-	if err != nil {
-		t.Fatalf("post /v1/mask: %v", err)
-	}
-	defer response.Body.Close()
+			serverURL, _ := startAppServerWithUpstream(t, missingPageUpstream(), nil)
 
-	var metadata core.ProcessMetadata
-	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
-		t.Fatalf("decode error metadata: %v", err)
-	}
-	if response.StatusCode != http.StatusBadGateway {
-		t.Fatalf("unexpected status %d, want 502: %#v", response.StatusCode, metadata.Error)
-	}
-	if metadata.Status != "failed" || metadata.Error == nil {
-		t.Fatalf("expected a failed metadata with an error, got %#v", metadata)
-	}
-	if metadata.Error.Code != "masking_failed" {
-		t.Fatalf("unexpected error code %q, want masking_failed: %#v", metadata.Error.Code, metadata.Error)
-	}
-	if !metadata.Error.Retryable {
-		t.Fatalf("expected a retryable error, got %#v", metadata.Error)
+			requestBody, contentType := buildMultipartBodyWithFilenameParam(t, `filename="sample.`+testCase.name+`"`, testCase.mimeType, testCase.content)
+			response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+			if err != nil {
+				t.Fatalf("post /v1/mask: %v", err)
+			}
+			defer response.Body.Close()
+
+			if response.StatusCode != http.StatusBadGateway {
+				t.Fatalf("unexpected status %d, want 502", response.StatusCode)
+			}
+			mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+			if err != nil || mediaType != "application/json" {
+				t.Fatalf("expected JSON without a result binary, got %q: %v", response.Header.Get("Content-Type"), err)
+			}
+			var metadata core.ProcessMetadata
+			decoder := json.NewDecoder(response.Body)
+			if err := decoder.Decode(&metadata); err != nil {
+				t.Fatalf("decode error metadata: %v", err)
+			}
+			if err := decoder.Decode(new(any)); err != io.EOF {
+				t.Fatalf("expected only error metadata, got trailing response data: %v", err)
+			}
+			if metadata.Output.DownloadURL != "" {
+				t.Fatalf("failed request has a download URL: %q", metadata.Output.DownloadURL)
+			}
+			if metadata.Status != "failed" || metadata.Error == nil {
+				t.Fatalf("expected a failed metadata with an error, got %#v", metadata)
+			}
+			if metadata.Error.Code != "masking_failed" {
+				t.Fatalf("unexpected error code %q, want masking_failed: %#v", metadata.Error.Code, metadata.Error)
+			}
+			if !metadata.Error.Retryable {
+				t.Fatalf("expected a retryable error, got %#v", metadata.Error)
+			}
+		})
 	}
 }
 
@@ -1736,32 +1761,102 @@ func TestMaskReportsAnUpstreamPageTheDocumentLacksAsRetryableBadGateway(t *testi
 func TestAsyncJobReportsAnUpstreamPageTheDocumentLacksAsRetryableMaskingFailure(t *testing.T) {
 	t.Parallel()
 
-	serverURL, _ := startAppServerWithUpstream(t, missingPageUpstream(), nil)
+	cases := []struct {
+		name     string
+		mimeType string
+		content  []byte
+	}{
+		{name: "pdf", mimeType: "application/pdf", content: createBlankPDF(400, 400)},
+		{name: "png", mimeType: "image/png", content: createBlankPNG(t, 400, 200)},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 
-	requestBody, contentType := buildMultipartBody(t, "sample.pdf", "application/pdf", createBlankPDF(400, 400), nil)
-	response, err := http.Post(serverURL+"/v1/jobs", contentType, requestBody)
-	if err != nil {
-		t.Fatalf("post /v1/jobs: %v", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusAccepted {
-		body, _ := io.ReadAll(response.Body)
-		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
-	}
-	var created core.ProcessMetadata
-	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
-		t.Fatalf("decode job metadata: %v", err)
-	}
+			serverURL, _ := startAppServerWithUpstream(t, missingPageUpstream(), nil)
 
-	job := waitForJobStatus(t, serverURL, created.JobID, "failed")
-	if job.Error == nil {
-		t.Fatalf("expected an error on the failed job, got %#v", job)
+			requestBody, contentType := buildMultipartBodyWithFilenameParam(t, `filename="sample.`+testCase.name+`"`, testCase.mimeType, testCase.content)
+			response, err := http.Post(serverURL+"/v1/jobs", contentType, requestBody)
+			if err != nil {
+				t.Fatalf("post /v1/jobs: %v", err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusAccepted {
+				body, _ := io.ReadAll(response.Body)
+				t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+			}
+			var created core.ProcessMetadata
+			if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
+				t.Fatalf("decode job metadata: %v", err)
+			}
+
+			job := waitForJobStatus(t, serverURL, created.JobID, "failed")
+			if job.Error == nil {
+				t.Fatalf("expected an error on the failed job, got %#v", job)
+			}
+			if job.Error.Code != "masking_failed" {
+				t.Fatalf("unexpected error code %q, want masking_failed: %#v", job.Error.Code, job.Error)
+			}
+			if !job.Error.Retryable {
+				t.Fatalf("expected a retryable error, got %#v", job.Error)
+			}
+			if job.Output.DownloadURL != "" {
+				t.Fatalf("failed job has a download URL: %q", job.Output.DownloadURL)
+			}
+			resultResponse, err := http.Get(serverURL + "/v1/jobs/" + url.PathEscape(created.JobID) + "/result")
+			if err != nil {
+				t.Fatalf("get failed job result: %v", err)
+			}
+			defer resultResponse.Body.Close()
+			if resultResponse.StatusCode != http.StatusNotFound {
+				t.Fatalf("failed job result status %d, want 404", resultResponse.StatusCode)
+			}
+		})
 	}
-	if job.Error.Code != "masking_failed" {
-		t.Fatalf("unexpected error code %q, want masking_failed: %#v", job.Error.Code, job.Error)
-	}
-	if !job.Error.Retryable {
-		t.Fatalf("expected a retryable error, got %#v", job.Error)
+}
+
+func TestMaskPNGDefaultsAnOmittedPageToTheFirstPage(t *testing.T) {
+	t.Parallel()
+
+	for _, pageField := range []string{"", `"page":0,`, `"page":1,`} {
+		t.Run("page_field_"+pageField, func(t *testing.T) {
+			t.Parallel()
+
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"type":"mock-pii","model":"pii","result":{"fields":[` +
+					`{"key":"개인정보.이름","value":"홍길동","boundingBoxes":[{` + pageField +
+					`"vertices":[{"x":40,"y":20},{"x":200,"y":20},{"x":200,"y":60},{"x":40,"y":60}]}]}]}}`))
+			})
+			serverURL, _ := startAppServerWithUpstream(t, upstream, nil)
+			requestBody, contentType := buildMultipartBodyWithFilenameParam(t, `filename="sample.png"`, "image/png", createBlankPNG(t, 400, 200))
+			response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+			if err != nil {
+				t.Fatalf("post /v1/mask: %v", err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusOK {
+				t.Fatalf("unexpected status %d, want 200", response.StatusCode)
+			}
+			metadata, fileBytes := parseMultipartMaskResponse(t, response)
+			if metadata.Status != "completed" || metadata.Error != nil {
+				t.Fatalf("expected completed metadata, got %#v", metadata)
+			}
+			if metadata.Output.MIMEType != "image/png" {
+				t.Fatalf("output MIME type %q, want image/png", metadata.Output.MIMEType)
+			}
+			img, err := png.Decode(bytes.NewReader(fileBytes))
+			if err != nil {
+				t.Fatalf("decode masked PNG: %v", err)
+			}
+			// The middle character of 홍길동 is masked within the reported box.
+			if got := color.Gray16Model.Convert(img.At(120, 40)); got != color.Black {
+				t.Fatalf("masked pixel = %v, want black", got)
+			}
+			if got := color.Gray16Model.Convert(img.At(10, 10)); got != color.White {
+				t.Fatalf("pixel outside the region = %v, want white", got)
+			}
+		})
 	}
 }
 
