@@ -201,6 +201,70 @@ func TestMultiBoxFieldsAreCoveredInFull(t *testing.T) {
 	}
 }
 
+// The sub-regions that cover only the masked runes of a value are cut out of the
+// box the inference endpoint reported, so they have to stay in the units that box
+// came in. Widening a thin span by "1" is a pixel- or page-unit repair; applied to
+// a box normalized to the page it adds a whole page width, which makes placeRegion
+// read the result as page units and stamp the wrong place.
+func TestBuildSubRegionsFromBBoxKeepsTheUnitsOfTheReportedBox(t *testing.T) {
+	t.Parallel()
+
+	// 홍길동 masks to 홍*동, so the only span is the middle rune.
+	const name = "홍길동"
+	spans := ComputeMaskedRuneSpans(name, MaskValue("개인정보.이름", name).MaskedValue)
+	if len(spans) != 1 || spans[0] != [2]int{1, 2} {
+		t.Fatalf("expected the middle rune to be the only masked span, got %#v", spans)
+	}
+
+	rect := func(minX, minY, maxX, maxY float64) [4][2]float64 {
+		return [4][2]float64{{minX, minY}, {maxX, minY}, {maxX, maxY}, {minX, maxY}}
+	}
+
+	tests := []struct {
+		name       string
+		poly       [4][2]float64
+		normalized bool
+		wantWidth  float64
+	}{
+		{
+			name:       "normalized box keeps the span inside the unit square",
+			poly:       rect(0.1, 0.1, 0.7, 0.3),
+			normalized: true,
+			wantWidth:  0.2, // 0.6 of the page wide over three runes
+		},
+		{
+			name:      "pixel box wide enough needs no repair",
+			poly:      rect(40, 20, 280, 140),
+			wantWidth: 80,
+		},
+		{
+			name:      "hairline pixel box is still widened to one unit",
+			poly:      rect(40, 20, 42, 140),
+			wantWidth: 1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			regions := buildSubRegionsFromBBox(test.poly, name, spans)
+			if len(regions) != len(spans) {
+				t.Fatalf("expected one region per span, got %#v", regions)
+			}
+			for _, region := range regions {
+				minX, minY, maxX, maxY := polygonBounds(region.Polygon)
+				if width := maxX - minX; math.Abs(width-test.wantWidth) > 1e-9 {
+					t.Fatalf("span width %.6f, want %.6f (%#v)", width, test.wantWidth, region.Polygon)
+				}
+				if test.normalized && !isNormalizedBox(minX, minY, maxX, maxY) {
+					t.Fatalf("a normalized box produced the non-normalized span (%.6f, %.6f)-(%.6f, %.6f)", minX, minY, maxX, maxY)
+				}
+			}
+		})
+	}
+}
+
 func TestPlaceRegionScalesNormalizedCoordinates(t *testing.T) {
 	t.Parallel()
 
