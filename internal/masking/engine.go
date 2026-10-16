@@ -166,12 +166,20 @@ func buildSubRegionsFromBBox(poly [4][2]float64, original string, spans [][2]int
 	}
 
 	minX, minY, maxX, maxY := polygonBounds(poly)
+	// A box normalized to the page is a fraction of it, so "1" there is the whole
+	// page width rather than the hairline this widens. Stretching it that far takes
+	// the box out of the unit square, after which placeRegion reads the coordinates
+	// as page units and stamps the corner instead of the reported area. A span is
+	// never empty, so a normalized box of any width already yields a visible one,
+	// and placeRegion widens what is left of a hairline after scaling into target
+	// units anyway.
+	repairHairlines := !isNormalizedBox(minX, minY, maxX, maxY)
 	totalRunes := float64(len(runes))
 	regions := make([]Region, 0, len(spans))
 	for _, span := range spans {
 		startX := minX + ((maxX - minX) * float64(span[0]) / totalRunes)
 		endX := minX + ((maxX - minX) * float64(span[1]) / totalRunes)
-		if endX-startX < 1 {
+		if repairHairlines && endX-startX < 1 {
 			endX = startX + 1
 		}
 		regions = append(regions, Region{

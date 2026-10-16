@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"hash/crc32"
 	"image"
 	"image/color"
@@ -1667,6 +1668,133 @@ func TestMaskNeverReportsAnUnmaskedValueInThePIISummary(t *testing.T) {
 	}
 	if item.MaskedValue == "900101" {
 		t.Fatalf("rule %q reported the original value in masked_value: %q", item.RuleName, item.MaskedValue)
+	}
+}
+
+// singleBoxUpstream answers 200 with one name field whose bounding box has the
+// given corners, alongside the page size of the 400x200 upload. The embedded mock
+// always reports the same pixel box, so an arbitrary one needs a local handler.
+func singleBoxUpstream(minX, minY, maxX, maxY float64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"type":"mock-pii","model":"pii","result":{"apiVersion":"1.1","documentType":"pii","confidence":0.99,`+
+			`"fields":[{"key":"개인정보.이름","value":"홍길동","confidence":0.99,"boundingBoxes":[{"page":1,"vertices":`+
+			`[{"x":%[1]v,"y":%[2]v},{"x":%[3]v,"y":%[2]v},{"x":%[3]v,"y":%[4]v},{"x":%[1]v,"y":%[4]v}]}]}],`+
+			`"metadata":{"pages":[{"page":1,"width":400,"height":200}]}}}`,
+			minX, minY, maxX, maxY)))
+	})
+}
+
+// blackPixelBounds reports the inclusive bounds of the painted pixels, so a test
+// can state where the mask landed rather than probe single coordinates it picked
+// because they happened to pass.
+func blackPixelBounds(t *testing.T, content []byte) (minX, minY, maxX, maxY int) {
+	t.Helper()
+
+	img, _, err := image.Decode(bytes.NewReader(content))
+	if err != nil {
+		t.Fatalf("decode masked image: %v", err)
+	}
+	bounds := img.Bounds()
+	minX, minY, maxX, maxY = -1, -1, -1, -1
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			if r != 0 || g != 0 || b != 0 {
+				continue
+			}
+			if minX == -1 || x < minX {
+				minX = x
+			}
+			if minY == -1 || y < minY {
+				minY = y
+			}
+			if x > maxX {
+				maxX = x
+			}
+			if y > maxY {
+				maxY = y
+			}
+		}
+	}
+	if minX == -1 {
+		t.Fatalf("the masked image has no painted pixel at all")
+	}
+	return minX, minY, maxX, maxY
+}
+
+// A box normalized to the page covers the same part of the document as the pixel
+// box with the same proportions, so masking only some runes of a value has to land
+// in the same place either way. Widening a thin span by one unit is a pixel repair;
+// on a 0..1 box it adds a whole page width, after which the coordinates are read as
+// page units and the mask is stamped in the top left corner - and the request is
+// still reported as completed, with the name it was meant to hide still legible.
+//
+// This drives the whole production path - config, app.New, the real HTTP handler,
+// the upstage client, CollectMaskRegions and the renderer - and reads the pixels of
+// the file the caller gets back.
+func TestMaskPlacesPartialMasksFromNormalizedBoxesOnTheReportedArea(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                   string
+		minX, minY, maxX, maxY float64
+		wantMinX, wantMinY     int
+		wantMaxX, wantMaxY     int
+	}{
+		{
+			// (0.1, 0.1)-(0.7, 0.3) of a 400x200 page is (40, 20)-(280, 60);
+			// the middle of three runes is the middle third, (120, 20)-(200, 60).
+			name: "normalized box",
+			minX: 0.1, minY: 0.1, maxX: 0.7, maxY: 0.3,
+			wantMinX: 120, wantMinY: 20, wantMaxX: 199, wantMaxY: 59,
+		},
+		{
+			// Tall enough that the widened box still clears minPlacedSize, so
+			// before the fix this answered 200 completed with the mask in the
+			// corner instead of refusing the request.
+			name: "normalized box tall enough to be placed",
+			minX: 0.1, minY: 0.1, maxX: 0.7, maxY: 0.7,
+			wantMinX: 120, wantMinY: 20, wantMaxX: 199, wantMaxY: 139,
+		},
+		{
+			// The control: pixel coordinates of the same area are untouched by
+			// the repair, which only ever applied to units of this size.
+			name: "pixel box",
+			minX: 40, minY: 20, maxX: 280, maxY: 140,
+			wantMinX: 120, wantMinY: 20, wantMaxX: 199, wantMaxY: 139,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			serverURL, _ := startAppServerWithUpstream(t, singleBoxUpstream(test.minX, test.minY, test.maxX, test.maxY), nil)
+
+			requestBody, contentType := buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 400, 200), nil)
+			response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+			if err != nil {
+				t.Fatalf("post /v1/mask: %v", err)
+			}
+			defer response.Body.Close()
+
+			if response.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(response.Body)
+				t.Fatalf("unexpected status %d, want 200: %s", response.StatusCode, string(body))
+			}
+
+			metadata, fileBytes := parseMultipartMaskResponse(t, response)
+			if metadata.Status != "completed" {
+				t.Fatalf("expected completed status, got %q (%#v)", metadata.Status, metadata.Error)
+			}
+
+			minX, minY, maxX, maxY := blackPixelBounds(t, fileBytes)
+			if minX != test.wantMinX || minY != test.wantMinY || maxX != test.wantMaxX || maxY != test.wantMaxY {
+				t.Fatalf("the mask covers (%d, %d)-(%d, %d), want (%d, %d)-(%d, %d)",
+					minX, minY, maxX, maxY, test.wantMinX, test.wantMinY, test.wantMaxX, test.wantMaxY)
+			}
+		})
 	}
 }
 
