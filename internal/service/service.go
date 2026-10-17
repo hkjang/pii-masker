@@ -599,6 +599,17 @@ func (s *Service) process(ctx context.Context, requestID string, input ProcessIn
 		metadata.Error = mapError(err)
 		return metadata, nil, err
 	}
+	// An answer that located some fields with coordinates and others without still
+	// produces regions, so the check above lets it through. The fields without
+	// coordinates would stay readable on a document handed back as completed, while
+	// pii_summary reports a rule as applied to them. Only the keys go into the
+	// detail: it is echoed into the response and into job.json, where a value would
+	// be the very PII this refuses to hand out.
+	if missing := masking.FieldsMissingGeometry(fieldEntries); len(missing) > 0 {
+		err = &maskingFailedError{detail: fmt.Sprintf("PII fields %v were detected but the upstream response reported no bounding box for them", missing)}
+		metadata.Error = mapError(err)
+		return metadata, nil, err
+	}
 
 	maskedContent := input.Attachment.Content
 	if len(regions) > 0 {
