@@ -126,6 +126,91 @@ func TestFieldEntriesTakeThePageFromTheBoundingBox(t *testing.T) {
 	}
 }
 
+// A field the endpoint reported without coordinates cannot be drawn over, and the
+// region collector skips it in silence. The summary is the only place left that
+// still knows the field existed, so it has to record which fields carried a box.
+func TestFieldEntriesRecordWhetherAFieldCarriesABoundingBox(t *testing.T) {
+	t.Parallel()
+
+	box := func(y float64) any {
+		return map[string]any{"page": 1, "vertices": []any{
+			map[string]any{"x": 1.0, "y": y}, map[string]any{"x": 5.0, "y": y},
+			map[string]any{"x": 5.0, "y": y + 4}, map[string]any{"x": 1.0, "y": y + 4},
+		}}
+	}
+
+	tests := []struct {
+		name        string
+		fields      []any
+		wantBoxed   map[string]bool
+		wantMissing []string
+	}{
+		{
+			name: "only one of two recognized fields is boxed",
+			fields: []any{
+				map[string]any{"key": "개인정보.이름", "value": "홍길동", "boundingBoxes": []any{box(1)}},
+				map[string]any{"key": "개인정보.휴대폰번호", "value": "010-1234-5678"},
+			},
+			wantBoxed:   map[string]bool{"개인정보.이름": true, "개인정보.휴대폰번호": false},
+			wantMissing: []string{"개인정보.휴대폰번호"},
+		},
+		{
+			// The collector keeps only the first sighting of a key and value, so a
+			// field repeated with its coordinates on the later copy is boxed. Taking
+			// the first sighting alone would refuse an answer that located it.
+			name: "the same field repeated with coordinates only on the second copy",
+			fields: []any{
+				map[string]any{"key": "개인정보.이름", "value": "홍길동"},
+				map[string]any{"key": "개인정보.이름", "value": "홍길동", "boundingBoxes": []any{box(1)}},
+			},
+			wantBoxed:   map[string]bool{"개인정보.이름": true},
+			wantMissing: nil,
+		},
+		{
+			// Walking the whole payload turns elements that are not entities into
+			// entries under the generic rule. They never carry coordinates, so
+			// refusing them would reject healthy answers.
+			name: "an unrecognized element without coordinates is not reported missing",
+			fields: []any{
+				map[string]any{"key": "개인정보.이름", "value": "홍길동", "boundingBoxes": []any{box(1)}},
+				map[string]any{"category": "paragraph", "content": "본문"},
+			},
+			wantBoxed:   map[string]bool{"개인정보.이름": true, "paragraph": false},
+			wantMissing: nil,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			entries := BuildFieldEntries(map[string]any{"fields": test.fields})
+			if len(entries) != len(test.wantBoxed) {
+				t.Fatalf("expected %d entries, got %#v", len(test.wantBoxed), entries)
+			}
+			for _, entry := range entries {
+				want, ok := test.wantBoxed[entry.Key]
+				if !ok {
+					t.Fatalf("unexpected entry for key %q", entry.Key)
+				}
+				if entry.HasBoundingBox != want {
+					t.Fatalf("key %q reports HasBoundingBox %t, want %t", entry.Key, entry.HasBoundingBox, want)
+				}
+			}
+			missing := FieldsMissingGeometry(entries)
+			if len(missing) != len(test.wantMissing) {
+				t.Fatalf("FieldsMissingGeometry returned %#v, want %#v", missing, test.wantMissing)
+			}
+			for index, key := range test.wantMissing {
+				if missing[index] != key {
+					t.Fatalf("FieldsMissingGeometry returned %#v, want %#v", missing, test.wantMissing)
+				}
+			}
+		})
+	}
+}
+
 func TestContainsGeometry(t *testing.T) {
 	t.Parallel()
 

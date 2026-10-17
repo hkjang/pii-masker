@@ -78,6 +78,7 @@
 - 응답 본문을 JSON으로 해석하지 못했을 때 (`upstream_payload_unrecognized`)
 - 응답에 `fields`/`document`/`documents`/`groups`/`entities` 같은 필드 목록이 아예 없거나, 좌표는 있는데 값을 하나도 읽어내지 못했을 때 (`upstream_payload_unrecognized`)
 - PII 필드는 있는데 bounding box가 없을 때 (`masking_failed`)
+- 보고된 PII 필드 중 일부에만 bounding box가 있을 때 — 알려진 마스킹 규칙이 적용된 필드에 좌표가 없으면 나머지를 그릴 수 있어도 거절합니다 (`masking_failed`)
 - 영역이 페이지 밖에 떨어지거나, 페이지 크기 정보 없이 페이지보다 큰 좌표를 쓰거나, 좌표가 숫자가 아니어서 어디를 덮어야 할지 알 수 없을 때 (`masking_failed`)
 - 영역이 문서에 없는 페이지를 가리킬 때 (`masking_failed`)
 - 덮을 영역이 있었는데도 결과가 원본과 한 바이트도 다르지 않을 때 (`masking_failed`)

@@ -43,16 +43,54 @@ type FieldEntry struct {
 	Confidence    float64     `json:"confidence,omitempty"`
 	HasConfidence bool        `json:"-"`
 	PageNumber    int         `json:"page,omitempty"`
+	// HasBoundingBox says whether the endpoint reported coordinates for this
+	// field. CollectMaskRegions skips a field without them in silence, so this is
+	// the only record that the field was reported but could not be drawn over.
+	HasBoundingBox bool `json:"-"`
 }
 
 func BuildFieldEntries(payload any) []FieldEntry {
 	entries := make([]FieldEntry, 0, 16)
-	seen := map[string]struct{}{}
+	seen := map[string]int{}
 	collectFieldEntriesRecursive(payload, seen, &entries)
 	return entries
 }
 
-func collectFieldEntriesRecursive(value any, seen map[string]struct{}, entries *[]FieldEntry) {
+// FieldsMissingGeometry reports the keys of the fields a known masking rule was
+// applied to that the endpoint located without coordinates, in the order they were
+// collected and without repeats.
+//
+// Only fields under a rule from SupportedRuleNames count. The collector walks the
+// whole response body, and extractEntityKey accepts type, category and class while
+// extractEntityValue accepts text, content and label, so elements that are not
+// entities at all - a paragraph, a layout box - become entries under the generic
+// fallback rule. Those never carry coordinates, so treating every unboxed entry as
+// an unmasked field would refuse healthy answers.
+func FieldsMissingGeometry(entries []FieldEntry) []string {
+	supported := map[string]struct{}{}
+	for _, name := range SupportedRuleNames() {
+		supported[name] = struct{}{}
+	}
+
+	var missing []string
+	seen := map[string]struct{}{}
+	for _, entry := range entries {
+		if entry.HasBoundingBox {
+			continue
+		}
+		if _, ok := supported[entry.Rule.RuleName]; !ok {
+			continue
+		}
+		if _, ok := seen[entry.Key]; ok {
+			continue
+		}
+		seen[entry.Key] = struct{}{}
+		missing = append(missing, entry.Key)
+	}
+	return missing
+}
+
+func collectFieldEntriesRecursive(value any, seen map[string]int, entries *[]FieldEntry) {
 	switch typed := value.(type) {
 	case map[string]any:
 		key := extractEntityKey(typed)
@@ -62,13 +100,22 @@ func collectFieldEntriesRecursive(value any, seen map[string]struct{}, entries *
 		}
 		if key != "" && fieldValue != "" {
 			signature := key + "\x00" + fieldValue
-			if _, ok := seen[signature]; !ok {
+			bboxes := parseBoundingBoxes(extractGeometryCandidate(typed))
+			if index, ok := seen[signature]; ok {
+				// Only the first sighting of a key and value is kept, but a field
+				// repeated with its coordinates on a later copy has been located
+				// all the same, so the two sightings are ored together.
+				if len(bboxes) > 0 {
+					(*entries)[index].HasBoundingBox = true
+				}
+			} else {
 				masked := MaskValue(key, fieldValue)
 				entry := FieldEntry{
-					Key:         key,
-					Value:       fieldValue,
-					MaskedValue: masked.MaskedValue,
-					Rule:        masked.Rule,
+					Key:            key,
+					Value:          fieldValue,
+					MaskedValue:    masked.MaskedValue,
+					Rule:           masked.Rule,
+					HasBoundingBox: len(bboxes) > 0,
 				}
 				if confidence, ok := numberValue(typed["confidence"]); ok {
 					entry.Confidence = confidence
@@ -79,12 +126,12 @@ func collectFieldEntriesRecursive(value any, seen map[string]struct{}, entries *
 				}
 				if pageNumber, ok := extractEntityPageNumber(typed); ok {
 					entry.PageNumber = pageNumber
-				} else if bboxes := parseBoundingBoxes(extractGeometryCandidate(typed)); len(bboxes) > 0 {
+				} else if len(bboxes) > 0 {
 					// Endpoints that put the page on each box rather than on
 					// the field still get a page in the summary.
 					entry.PageNumber = bboxes[0].PageNumber
 				}
-				seen[signature] = struct{}{}
+				seen[signature] = len(*entries)
 				*entries = append(*entries, entry)
 			}
 		}

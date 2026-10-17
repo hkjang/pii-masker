@@ -1798,6 +1798,152 @@ func TestMaskPlacesPartialMasksFromNormalizedBoxesOnTheReportedArea(t *testing.T
 	}
 }
 
+// The field fragments a partially boxed answer is assembled from. The embedded mock
+// attaches coordinates to all five of its fields, so a response that locates a field
+// without them needs a local handler.
+const (
+	boxedNameField   = `{"key":"개인정보.이름","value":"홍길동","confidence":0.99,"boundingBoxes":[{"page":1,"vertices":[{"x":40,"y":20},{"x":200,"y":20},{"x":200,"y":60},{"x":40,"y":60}]}]}`
+	boxedPhoneField  = `{"key":"개인정보.휴대폰번호","value":"010-1234-5678","confidence":0.96,"boundingBoxes":[{"page":1,"vertices":[{"x":40,"y":100},{"x":260,"y":100},{"x":260,"y":140},{"x":40,"y":140}]}]}`
+	unboxedPhoneFld  = `{"key":"개인정보.휴대폰번호","value":"010-1234-5678","confidence":0.96}`
+	unboxedParagraph = `{"category":"paragraph","content":"본문"}`
+)
+
+// partiallyBoxedUpstream answers 200 with the given field fragments alongside the
+// page size of the 400x200 upload.
+func partiallyBoxedUpstream(fields ...string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"mock-pii","model":"pii","result":{"apiVersion":"1.1","documentType":"pii","confidence":0.99,` +
+			`"fields":[` + strings.Join(fields, ",") + `],` +
+			`"metadata":{"pages":[{"page":1,"width":400,"height":200}]}}}`))
+	})
+}
+
+// A response that boxes one reported PII field and not the next used to pass the
+// fail-closed check, because that check only asks whether the whole answer produced
+// no region at all. The file came back under a 200 with the unboxed value still
+// readable on it, while pii_summary claimed a rule had been applied to it.
+func TestMaskRejectsAnUpstreamAnswerThatBoxesOnlySomeReportedPII(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		fields     []string
+		wantStatus int
+	}{
+		{
+			name:       "a recognized field without coordinates is refused",
+			fields:     []string{boxedNameField, unboxedPhoneFld},
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name:       "every recognized field boxed still succeeds",
+			fields:     []string{boxedNameField, boxedPhoneField},
+			wantStatus: http.StatusOK,
+		},
+		{
+			// The collector walks the whole payload, so elements that are not
+			// entities at all become summary rows under the generic rule. Those
+			// never carried coordinates, and refusing them would turn healthy
+			// answers into failures.
+			name:       "an unrecognized element without coordinates still succeeds",
+			fields:     []string{boxedNameField, unboxedParagraph},
+			wantStatus: http.StatusOK,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			serverURL, _ := startAppServerWithUpstream(t, partiallyBoxedUpstream(test.fields...), nil)
+
+			requestBody, contentType := buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 400, 200), nil)
+			response, err := http.Post(serverURL+"/v1/mask", contentType, requestBody)
+			if err != nil {
+				t.Fatalf("post /v1/mask: %v", err)
+			}
+			defer response.Body.Close()
+
+			if response.StatusCode != test.wantStatus {
+				body, _ := io.ReadAll(response.Body)
+				t.Fatalf("unexpected status %d, want %d: %s", response.StatusCode, test.wantStatus, string(body))
+			}
+			if test.wantStatus == http.StatusOK {
+				metadata, _ := parseMultipartMaskResponse(t, response)
+				if metadata.Status != "completed" {
+					t.Fatalf("expected completed status, got %q (%#v)", metadata.Status, metadata.Error)
+				}
+				return
+			}
+
+			// The refusal must not hand back a file, so the answer carries JSON
+			// only rather than the multipart body a success uses.
+			if mediaType := response.Header.Get("Content-Type"); !strings.HasPrefix(mediaType, "application/json") {
+				t.Fatalf("a refusal must not return file bytes, got content type %q", mediaType)
+			}
+			var metadata core.ProcessMetadata
+			if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+				t.Fatalf("decode error metadata: %v", err)
+			}
+			if metadata.Status != "failed" || metadata.Error == nil {
+				t.Fatalf("expected a failed metadata with an error, got %#v", metadata)
+			}
+			if metadata.Error.Code != "masking_failed" {
+				t.Fatalf("unexpected error code %q, want masking_failed: %#v", metadata.Error.Code, metadata.Error)
+			}
+			if !metadata.Error.Retryable {
+				t.Fatalf("expected a retryable error, got %#v", metadata.Error)
+			}
+			// The detail is echoed into the response and into job.json, so it
+			// names the field key and never the value behind it.
+			if strings.Contains(metadata.Error.Detail, "010-1234-5678") {
+				t.Fatalf("the refusal must not repeat the field value: %q", metadata.Error.Detail)
+			}
+			if !strings.Contains(metadata.Error.Detail, "개인정보.휴대폰번호") {
+				t.Fatalf("expected the unboxed field key in the detail, got %q", metadata.Error.Detail)
+			}
+		})
+	}
+}
+
+// The async path reports the same failure in the job record and advertises no
+// download URL, so neither path hands out a file for an answer it could not draw.
+func TestAsyncJobRejectsAnUpstreamAnswerThatBoxesOnlySomeReportedPII(t *testing.T) {
+	t.Parallel()
+
+	serverURL, _ := startAppServerWithUpstream(t, partiallyBoxedUpstream(boxedNameField, unboxedPhoneFld), nil)
+
+	requestBody, contentType := buildMultipartBody(t, "sample.png", "image/png", createBlankPNG(t, 400, 200), nil)
+	response, err := http.Post(serverURL+"/v1/jobs", contentType, requestBody)
+	if err != nil {
+		t.Fatalf("post /v1/jobs: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	var created core.ProcessMetadata
+	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
+		t.Fatalf("decode job metadata: %v", err)
+	}
+
+	job := waitForJobStatus(t, serverURL, created.JobID, "failed")
+	if job.Error == nil {
+		t.Fatalf("expected an error on the failed job, got %#v", job)
+	}
+	if job.Error.Code != "masking_failed" {
+		t.Fatalf("unexpected error code %q, want masking_failed: %#v", job.Error.Code, job.Error)
+	}
+	if !job.Error.Retryable {
+		t.Fatalf("expected a retryable error, got %#v", job.Error)
+	}
+	if job.Output.DownloadURL != "" {
+		t.Fatalf("expected no download url on a failed job, got %q", job.Output.DownloadURL)
+	}
+}
+
 // offPageBoxUpstream answers 200 with a field to mask whose bounding box sits far
 // outside the uploaded 400x200 image and reports no page size, so the masker cannot
 // tell what units the coordinates are in and refuses to hand back a file it could
